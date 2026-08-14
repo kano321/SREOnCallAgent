@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · SRE On-Call Agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand">
+        <span class="logo">◈</span>
+        <h1>SRE On-Call Agent</h1>
+        <p>AI 值班助手监控台</p>
+      </div>
+
+      <nav class="login-tabs">
+        <button data-view="login" class="active">登录</button>
+        <button data-view="register">注册</button>
+        <button data-view="forgot">找回密码</button>
+      </nav>
+
+      <!-- 登录 -->
+      <form id="view-login" class="login-view active">
+        <label>用户名</label>
+        <input type="text" id="loginUsername" autocomplete="username" required>
+        <label>密码</label>
+        <input type="password" id="loginPassword" autocomplete="current-password" required>
+        <div class="login-msg" id="loginMsg"></div>
+        <button type="submit" class="btn-primary">登 录</button>
+      </form>
+
+      <!-- 注册 -->
+      <form id="view-register" class="login-view">
+        <label>用户名（至少 3 个字符）</label>
+        <input type="text" id="regUsername" autocomplete="username" required>
+        <label>密码（至少 6 个字符）</label>
+        <input type="password" id="regPassword" autocomplete="new-password" required>
+        <label>安全问题（用于找回密码）</label>
+        <input type="text" id="regQuestion" placeholder="例如：我的第一只宠物叫什么？" required>
+        <label>安全答案</label>
+        <input type="text" id="regAnswer" required>
+        <div class="login-msg" id="regMsg"></div>
+        <button type="submit" class="btn-primary">注 册</button>
+      </form>
+
+      <!-- 找回密码：两步 -->
+      <form id="view-forgot" class="login-view">
+        <div id="forgotStep1">
+          <label>用户名</label>
+          <input type="text" id="forgotUsername" required>
+          <div class="login-msg" id="forgotMsg1"></div>
+          <button type="button" class="btn-primary" id="forgotNext">下一步</button>
+        </div>
+        <div id="forgotStep2" style="display:none">
+          <label>安全问题</label>
+          <div class="login-question" id="forgotQuestion">…</div>
+          <label>答案</label>
+          <input type="text" id="forgotAnswer" required>
+          <label>新密码（至少 6 个字符）</label>
+          <input type="password" id="forgotNewPassword" required>
+          <div class="login-msg" id="forgotMsg2"></div>
+          <button type="submit" class="btn-primary">重置密码</button>
+          <button type="button" class="btn-ghost" id="forgotBack">← 返回</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/login.js"></script>
+</body>
+</html>

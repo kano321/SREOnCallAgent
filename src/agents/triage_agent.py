@@ -21,14 +21,16 @@ Alert Details:
 Output a Python list of 4-6 investigation steps. Each step must be a dict with:
   {{"tool": "<tool_name>", "query": "<specific query string>", "reason": "<why this step>"}}
 
+IMPORTANT: The "reason" field MUST be written in Simplified Chinese (简体中文).
+
 Output ONLY the Python list, wrapped in ```python ... ```. No other text.
 
 Example:
 ```python
 [
-  {{"tool": "log_search", "query": "ERROR", "reason": "Find all error-level log entries to identify the failure pattern"}},
-  {{"tool": "metric_query", "query": "latency", "reason": "Quantify the latency degradation over time"}},
-  {{"tool": "runbook_lookup", "query": "high latency", "reason": "Get standard remediation steps"}}
+  {{"tool": "log_search", "query": "ERROR", "reason": "查找所有错误级别日志，识别故障模式"}},
+  {{"tool": "metric_query", "query": "latency", "reason": "量化延迟劣化趋势"}},
+  {{"tool": "runbook_lookup", "query": "high latency", "reason": "获取标准处置步骤"}}
 ]
 ```
 """

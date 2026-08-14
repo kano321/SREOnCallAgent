@@ -1,13 +1,55 @@
 /* ============================================================
    SRE On-Call Agent · 监控台前端逻辑
    - 通过 SSE (EventSource) 订阅 Agent 调查过程的实时事件
+   - 支持多个调查并发：每个调查一张独立卡片
    - 渲染实时步骤、Markdown 报告、历史报告列表
    零依赖：原生 JS，无 CDN
    ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
 
-const state = { es: null, currentId: null };
+const state = {
+  currentId: null,                    // 当前选中的事故
+  nextRunId: 1,                       // 本地运行计数器
+  runs: new Map(),                    // runId -> { es, incidentId, card, pct }
+  runningByIncident: new Map(),       // incidentId -> runId (防止同一事故重复调查)
+};
+
+/* ---------------- 认证 ---------------- */
+
+const TOKEN_KEY = "sre_token";
+
+function token() { return localStorage.getItem(TOKEN_KEY); }
+
+async function authFetch(path, opts) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...(opts && opts.headers), "Authorization": "Bearer " + token() },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem("sre_username");
+    location.href = "/login.html";
+    throw new Error("unauthorized");
+  }
+  return res;
+}
+
+function checkAuth() {
+  if (!token()) {
+    location.href = "/login.html";
+    return false;
+  }
+  $("#userName").textContent = localStorage.getItem("sre_username") || "";
+  return true;
+}
+
+$("#logoutBtn").onclick = async () => {
+  try { await fetch("/auth/logout", { headers: { "Authorization": "Bearer " + token() } }); } catch (_) {}
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem("sre_username");
+  location.href = "/login.html";
+};
 
 /* ---------------- 工具函数 ---------------- */
 
@@ -20,13 +62,13 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-function logLine(cls, html) {
+function logLine(consoleEl, cls, html) {
   const line = document.createElement("div");
   line.className = "cline " + cls;
   line.innerHTML = html;
-  $("#console").appendChild(line);
+  consoleEl.appendChild(line);
   if ($("#autoscroll").checked) {
-    $("#console").scrollTop = $("#console").scrollHeight;
+    consoleEl.scrollTop = consoleEl.scrollHeight;
   }
 }
 
@@ -41,7 +83,7 @@ function inlineMd(s) {
 function buildTable(rows) {
   const cells = (row) => row.split("|").slice(1, -1).map((c) => inlineMd(c.trim()));
   let html = "<table><thead><tr>" + cells(rows[0]).map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>";
-  for (const row of rows.slice(2)) {          // 跳过 |---|---| 分隔行
+  for (const row of rows.slice(2)) {
     if (!row.trim()) continue;
     html += "<tr>" + cells(row).map((c) => "<td>" + c + "</td>").join("") + "</tr>";
   }
@@ -96,98 +138,202 @@ function renderMarkdown(md) {
   return html;
 }
 
+/* ---------------- 调查卡片 ---------------- */
+
+function createRunCard(incidentId, ref) {
+  const runId = state.nextRunId++;
+  const card = document.createElement("div");
+  card.className = "run-card";
+  card.id = "run-" + runId;
+  card.innerHTML =
+    `<div class="run-header">` +
+    `<span class="run-title">${esc(incidentId)}</span>` +
+    `<span class="run-status running">⏳ 调查中…</span>` +
+    `<button class="run-minimize" title="最小化">—</button>` +
+    `<button class="run-close" title="关闭">×</button>` +
+    `</div>` +
+    `<div class="run-progress"><div class="run-progress-bar"></div><span class="run-progress-text">0%</span></div>` +
+    `<div class="run-console"></div>` +
+    `<details class="run-report"><summary>📄 复盘报告</summary><div class="report-content"></div></details>`;
+  card.querySelector(".run-close").onclick = () => closeRun(runId);
+  card.querySelector(".run-minimize").onclick = () => card.classList.toggle("collapsed");
+  state.runs.set(runId, { es: null, incidentId, card, pct: 0, ref });
+  $("#runs").appendChild(card);
+  $("#emptyHint").style.display = "none";
+  return { runId, card };
+}
+
+function findRunByRef(ref) {
+  for (const [runId, run] of state.runs) {
+    if (run.ref === ref) return runId;
+  }
+  return null;
+}
+
+function focusCard(runId) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  run.card.scrollIntoView({ behavior: "smooth", block: "start" });
+  const report = run.card.querySelector(".run-report");
+  if (report) report.open = true;
+  run.card.classList.add("flash");
+  setTimeout(() => run.card.classList.remove("flash"), 1600);
+}
+
+function updateProgress(runId, pct) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  run.pct = Math.max(run.pct, pct);           // 进度只增不减
+  run.card.querySelector(".run-progress-bar").style.width = run.pct + "%";
+  run.card.querySelector(".run-progress-text").textContent = run.pct + "%";
+}
+
+function closeRun(runId) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  if (run.es) { run.es.close(); }
+  state.runningByIncident.delete(run.incidentId);
+  state.runs.delete(runId);
+  run.card.remove();
+  if (state.runs.size === 0) {
+    $("#emptyHint").style.display = "";
+  }
+}
+
+function setRunStatus(runId, cls, text) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  const badge = run.card.querySelector(".run-status");
+  badge.className = "run-status " + cls;
+  badge.textContent = text;
+}
+
 /* ---------------- SSE 事件处理 ---------------- */
 
-function handleEvent(ev) {
+function handleEvent(runId, ev) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  const consoleEl = run.card.querySelector(".run-console");
+
   switch (ev.type) {
     case "start":
-      logLine("done", `⏳ 开始调查事故 <b>${esc(ev.incident_id)}</b>（连接已建立）`);
+      updateProgress(runId, 5);
+      logLine(consoleEl, "done", `⏳ 调查开始（SSE 连接已建立）`);
       break;
 
-    case "stage":
-      logLine("stage",
+    case "stage": {
+      const pctMap = { 1: { start: 10, end: 25 }, 2: { start: 30, end: 78 }, 3: { start: 82, end: 98 } };
+      const phase = pctMap[ev.stage] || {};
+      updateProgress(runId, ev.status === "start" ? phase.start : phase.end);
+      logLine(consoleEl, "stage",
         `───── STAGE ${ev.stage}: ${esc(ev.name)} — ${ev.status === "start" ? "启动" : "完成"} ─────`);
       break;
+    }
 
     case "plan":
-      logLine("plan-title", `📋 调查计划（${ev.steps.length} 步）：`);
+      updateProgress(runId, 20);
+      logLine(consoleEl, "plan-title", `📋 调查计划（${ev.steps.length} 步）：`);
       ev.steps.forEach((s, i) =>
-        logLine("plan",
+        logLine(consoleEl, "plan",
           `&nbsp;&nbsp;${i + 1}. [${esc(s.tool)}] ${esc(s.query)} — ${esc(s.reason)}`));
       break;
 
-    case "step":
-      if (ev.thought)     logLine("thought", `💭 Thought: ${esc(ev.thought)}`);
-      if (ev.action)      logLine("action", `🔧 Action: ${esc(ev.action)}`);
-      if (ev.observation) logLine("observation", `👀 Observation: ${esc(ev.observation)}`);
+    case "step": {
+      const run = state.runs.get(runId);
+      updateProgress(runId, Math.min(70, (run ? run.pct : 30) + 4));
+      if (ev.thought)     logLine(consoleEl, "thought", `💭 Thought: ${esc(ev.thought)}`);
+      if (ev.action)      logLine(consoleEl, "action", `🔧 Action: ${esc(ev.action)}`);
+      if (ev.observation) logLine(consoleEl, "observation", `👀 Observation: ${esc(ev.observation)}`);
       break;
+    }
 
     case "root_cause":
-      logLine("root-cause", `✅ 根因确认：${esc(ev.conclusion)}`);
+      updateProgress(runId, 75);
+      logLine(consoleEl, "root-cause", `✅ 根因确认：${esc(ev.conclusion)}`);
       break;
 
     case "draft":
-      logLine("note", "✍️ 复盘报告初稿完成，进入自我评审…");
+      updateProgress(runId, 88);
+      logLine(consoleEl, "note", "✍️ 复盘报告初稿完成，进入自我评审…");
       break;
 
     case "critique":
-      logLine("critique", `🔍 自我评审 #${ev.revision}：质量分 <b>${esc(ev.score)}/10</b>`);
+      updateProgress(runId, 92);
+      logLine(consoleEl, "critique", `🔍 自我评审 #${ev.revision}：质量分 <b>${esc(ev.score)}/10</b>`);
       break;
 
     case "revise":
-      logLine("note", `🔄 依据评审意见完成修订（第 ${esc(ev.revision)} 轮）`);
+      updateProgress(runId, 96);
+      logLine(consoleEl, "note", `🔄 依据评审意见完成修订（第 ${esc(ev.revision)} 轮）`);
       break;
 
     case "report":
-      logLine("note", "📄 复盘报告已生成，点击上方「复盘报告」标签查看");
-      showReport(ev.report);
+      updateProgress(runId, 100);
+      logLine(consoleEl, "note", "📄 复盘报告已生成，展开下方「复盘报告」查看");
+      run.card.querySelector(".run-report .report-content").innerHTML = renderMarkdown(ev.report);
       break;
 
     case "error":
-      logLine("error", `❌ 调查出错：${esc(ev.message)}`);
+      logLine(consoleEl, "error", `❌ 调查出错：${esc(ev.message)}`);
       break;
 
     case "done":
-      logLine("done", "🏁 调查结束");
-      finishStream();
+      updateProgress(runId, 100);
+      logLine(consoleEl, "done", "🏁 调查结束");
+      setRunStatus(runId, "done", "✅ 已完成");
+      finishRun(runId);
       loadReports();
       break;
   }
 }
 
-function finishStream() {
-  if (state.es) { state.es.close(); state.es = null; }
-  $("#runBtn").disabled = false;
+function finishRun(runId) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  if (run.es) { run.es.close(); run.es = null; }
+  state.runningByIncident.delete(run.incidentId);
 }
 
 /* ---------------- 调查流程 ---------------- */
 
 function runInvestigation() {
   if (!state.currentId) return;
-  $("#console").innerHTML = "";
-  $("#reportContent").innerHTML = '<div class="placeholder">调查完成后自动生成复盘报告</div>';
-  $("#runBtn").disabled = true;
 
-  if (state.es) state.es.close();
+  // 同一事故已在进行中的调查 → 提示并跳转到该卡片，不重复开
+  if (state.runningByIncident.has(state.currentId)) {
+    const existingRunId = state.runningByIncident.get(state.currentId);
+    const run = state.runs.get(existingRunId);
+    if (run) {
+      logLine(run.card.querySelector(".run-console"), "warn",
+        `⚠️ ${esc(state.currentId)} 已有调查在进行中，请等待完成或关闭后重试`);
+      focusCard(existingRunId);
+    }
+    return;
+  }
+
+  const { runId, card } = createRunCard(state.currentId, "live-" + state.currentId);
+  state.runningByIncident.set(state.currentId, runId);
 
   const es = new EventSource(
-    `/incidents/investigate/stream?incident_id=${encodeURIComponent(state.currentId)}`
+    `/incidents/investigate/stream?incident_id=${encodeURIComponent(state.currentId)}` +
+    `&token=${encodeURIComponent(token())}`
   );
-  state.es = es;
+  state.runs.get(runId).es = es;
 
   es.onmessage = (e) => {
-    try { handleEvent(JSON.parse(e.data)); } catch (_) { /* 忽略坏消息 */ }
+    try { handleEvent(runId, JSON.parse(e.data)); } catch (_) { /* 忽略坏消息 */ }
   };
   es.onerror = () => {
     // 服务端关闭流（done 之后）会触发 onerror；已处理过 done 则忽略
-    if (state.es === es) finishStream();
+    const run = state.runs.get(runId);
+    if (run && run.es === es) finishRun(runId);
   };
 }
 
 /* ---------------- 数据加载 ---------------- */
 
 async function loadIncidents() {
-  const res = await fetch("/incidents/fixtures");
+  const res = await authFetch("/incidents/fixtures");
   const data = await res.json();
   const box = $("#incidentList");
   box.innerHTML = "";
@@ -206,7 +352,7 @@ async function loadIncidents() {
 }
 
 async function loadReports() {
-  const res = await fetch("/incidents/reports");
+  const res = await authFetch("/incidents/reports");
   if (!res.ok) return;
   const data = await res.json();
   const ul = $("#reportList");
@@ -224,25 +370,26 @@ async function loadReports() {
 }
 
 async function loadReport(id) {
-  const res = await fetch(`/incidents/reports/${id}`);
+  // 同一历史报告已打开 → 直接跳转过去，不重复开卡片
+  const existingRunId = findRunByRef("hist-" + id);
+  if (existingRunId !== null) {
+    focusCard(existingRunId);
+    return;
+  }
+
+  const res = await authFetch(`/incidents/reports/${id}`);
   if (!res.ok) return;
   const data = await res.json();
-  switchTab("report");
-  $("#reportContent").innerHTML = renderMarkdown(data.payload.report);
+  const { runId, card } = createRunCard(data.payload.incident_id, "hist-" + id);
+  card.querySelector(".run-header .run-title").textContent =
+    `${data.payload.incident_id}（历史 #${id}）`;
+  setRunStatus(runId, "done", "📄 历史报告");
+  card.querySelector(".run-console").style.display = "none";
+  card.querySelector(".run-report .report-content").innerHTML = renderMarkdown(data.payload.report);
+  card.querySelector(".run-report").open = true;
 }
 
-/* ---------------- 状态与标签页 ---------------- */
-
-function switchTab(tab) {
-  document.querySelectorAll(".tabs button").forEach((b) =>
-    b.classList.toggle("active", b.dataset.tab === tab));
-  document.querySelectorAll(".tab-panel").forEach((p) =>
-    p.classList.toggle("active", p.id === tab));
-}
-
-function showReport(md) {
-  $("#reportContent").innerHTML = renderMarkdown(md);
-}
+/* ---------------- 健康探测 ---------------- */
 
 async function pollHealth() {
   try {
@@ -258,9 +405,8 @@ async function pollHealth() {
 
 /* ---------------- 初始化 ---------------- */
 
-document.querySelectorAll(".tabs button").forEach((btn) => {
-  btn.onclick = () => switchTab(btn.dataset.tab);
-});
+if (!checkAuth()) throw new Error("not authenticated");
+
 $("#runBtn").onclick = runInvestigation;
 
 loadIncidents();

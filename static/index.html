@@ -13,7 +13,11 @@
       <h1>SRE On-Call Agent</h1>
       <span class="sub">AI 值班助手监控台</span>
     </div>
-    <div id="status" class="status ok">● 服务正常</div>
+    <div class="topbar-right">
+      <span id="userName" class="user-name"></span>
+      <button id="logoutBtn" class="btn-logout">退出登录</button>
+      <div id="status" class="status ok">● 服务正常</div>
+    </div>
   </header>
 
   <main class="layout">
@@ -33,23 +37,12 @@
 
     <!-- ============ 主内容区 ============ -->
     <section class="content">
-      <nav class="tabs">
-        <button data-tab="live" class="active">实时追踪</button>
-        <button data-tab="report">复盘报告</button>
-      </nav>
-
-      <div id="live" class="tab-panel active">
-        <div id="console" class="console"></div>
-        <label class="scroll-toggle">
-          <input type="checkbox" id="autoscroll" checked> 自动滚动
-        </label>
+      <div id="runs" class="runs">
+        <div class="placeholder" id="emptyHint">选择左侧事故，点击「开始调查」</div>
       </div>
-
-      <div id="report" class="tab-panel">
-        <div id="reportContent" class="report-content">
-          <div class="placeholder">调查完成后自动生成复盘报告</div>
-        </div>
-      </div>
+      <label class="scroll-toggle">
+        <input type="checkbox" id="autoscroll" checked> 自动滚动
+      </label>
     </section>
   </main>
 

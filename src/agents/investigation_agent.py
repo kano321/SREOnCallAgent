@@ -39,6 +39,9 @@ Your Finish conclusion should be 2-3 sentences summarizing:
 - The evidence that confirmed it
 - The recommended immediate action
 
+IMPORTANT: Your "Thought" reasoning and your "Finish" conclusion MUST be written in
+Simplified Chinese (简体中文). Tool queries stay in English.
+
 Respond with exactly:
 Thought: <your reasoning>
 Action: <tool_name>[<query>]

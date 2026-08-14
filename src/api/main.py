@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI server for the SRE On-Call Agent.
 
 Run with: uvicorn src.api.main:app --reload --port 8000
@@ -10,26 +10,26 @@ Endpoints:
   POST /incidents/investigate           — run the full 3-agent pipeline (sync)
   GET  /incidents/investigate/stream    — run pipeline with SSE streaming (for frontend)
   GET  /incidents/{id}/report           — retrieve a report generated this session
-  GET  /incidents/reports               — list historical reports (SQLite)
+  GET  /incidents/reports               — list historical reports (MySQL)
   GET  /incidents/reports/{rid}         — retrieve a historical report by run id
 """
 import asyncio
 import json
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from src.agents.pipeline import run_pipeline, list_incidents, load_incident
+from src.api.auth import router as auth_router, get_current_user
+from src.api import db
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "reports.db"
 
 app = FastAPI(
     title="SRE On-Call Agent",
@@ -44,51 +44,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
+
 # In-memory store for this session's reports (SQLite keeps the full history)
 _report_store: Dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
-# SQLite persistence
+# MySQL persistence
 # ---------------------------------------------------------------------------
-def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _init_db() -> None:
-    with _db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reports (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                incident_id TEXT    NOT NULL,
-                service     TEXT,
-                severity    TEXT,
-                created_at  TEXT    NOT NULL,
-                payload     TEXT    NOT NULL
-            )
-            """
-        )
-
-
 def _save_report(result: Dict[str, Any]) -> None:
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO reports (incident_id, service, severity, created_at, payload) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                result["incident_id"],
-                result.get("service", ""),
-                result.get("severity", ""),
-                time.strftime("%Y-%m-%d %H:%M:%S"),
-                json.dumps(result, ensure_ascii=False),
-            ),
-        )
+    db.execute(
+        "INSERT INTO reports (incident_id, service, severity, created_at, payload) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (
+            result["incident_id"],
+            result.get("service", ""),
+            result.get("severity", ""),
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            json.dumps(result, ensure_ascii=False),
+        ),
+    )
 
 
-_init_db()
+db.init_db()
 
 
 class InvestigateRequest(BaseModel):
@@ -104,13 +83,19 @@ def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/login.html")
+def login_page():
+    """Serve the login / register / password-recovery page."""
+    return FileResponse(STATIC_DIR / "login.html")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
 @app.get("/incidents/fixtures")
-def get_fixtures():
+def get_fixtures(user: str = Depends(get_current_user)):
     """List all available sample incident IDs."""
     return {"incidents": list_incidents()}
 
@@ -119,7 +104,7 @@ def get_fixtures():
 # Sync pipeline (kept for CLI/curl compatibility)
 # ---------------------------------------------------------------------------
 @app.post("/incidents/investigate")
-def investigate(req: InvestigateRequest):
+def investigate(req: InvestigateRequest, user: str = Depends(get_current_user)):
     """
     Run the full triage → investigation → post-mortem pipeline synchronously.
     """
@@ -149,7 +134,10 @@ def _sse(event: Dict[str, Any]) -> str:
 
 
 @app.get("/incidents/investigate/stream")
-async def investigate_stream(incident_id: str = Query(...)):
+async def investigate_stream(
+    incident_id: str = Query(...),
+    user: str = Depends(get_current_user),
+):
     """
     Run the pipeline in a background thread and stream every agent step
     to the client as Server-Sent Events.
@@ -212,7 +200,7 @@ async def investigate_stream(incident_id: str = Query(...)):
 # Report retrieval
 # ---------------------------------------------------------------------------
 @app.get("/incidents/{incident_id}/report")
-def get_report(incident_id: str):
+def get_report(incident_id: str, user: str = Depends(get_current_user)):
     """Retrieve a report generated earlier in this session."""
     if incident_id not in _report_store:
         raise HTTPException(
@@ -226,27 +214,28 @@ def get_report(incident_id: str):
 
 
 @app.get("/incidents/reports")
-def list_reports():
+def list_reports(user: str = Depends(get_current_user)):
     """List all historical reports (newest first)."""
-    with _db() as conn:
-        rows = conn.execute(
-            "SELECT id, incident_id, service, severity, created_at "
-            "FROM reports ORDER BY id DESC"
-        ).fetchall()
-    return {"reports": [dict(r) for r in rows]}
+    rows = db.query(
+        "SELECT id, incident_id, service, severity, "
+        "DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
+        "FROM reports ORDER BY id DESC"
+    )
+    return {"reports": rows}
 
 
 @app.get("/incidents/reports/{rid}")
-def get_report_by_id(rid: int):
+def get_report_by_id(rid: int, user: str = Depends(get_current_user)):
     """Retrieve one historical report by its run id."""
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT id, incident_id, service, severity, created_at, payload "
-            "FROM reports WHERE id = ?",
-            (rid,),
-        ).fetchone()
-    if not row:
+    rows = db.query(
+        "SELECT id, incident_id, service, severity, payload, "
+        "DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
+        "FROM reports WHERE id = %s",
+        (rid,),
+    )
+    if not rows:
         raise HTTPException(status_code=404, detail=f"No report with id {rid}")
+    row = rows[0]
     return {
         "id": row["id"],
         "incident_id": row["incident_id"],

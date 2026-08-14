@@ -31,6 +31,8 @@ Write the post-mortem with these EXACT sections:
 6. ## Action Items (table with columns: Action | Owner | Due Date | Priority)
 7. ## Lessons Learned (2-4 bullet points about what this incident taught us)
 
+IMPORTANT: Write the ENTIRE post-mortem in Simplified Chinese (简体中文). Keep the
+7 section headings as-is (English headings), but all body content must be Chinese.
 Be specific — reference actual log messages, metric values, and timestamps from the data.
 """
 
@@ -53,6 +55,8 @@ Respond with a JSON object:
   "issues": ["<issue 1>", "<issue 2>", ...],
   "suggestions": ["<improvement 1>", "<improvement 2>", ...]
 }}
+
+IMPORTANT: Write the "issues" and "suggestions" arrays in Simplified Chinese (简体中文).
 """
 
 REVISE_PROMPT = """
@@ -67,6 +71,9 @@ REVIEWER FEEDBACK:
 
 Output the complete revised post-mortem in Markdown. No preamble — start directly with
 the post-mortem content.
+
+IMPORTANT: Output the revised report in Simplified Chinese (简体中文), keeping the
+7 section headings as-is (English headings).
 """
 
 
