@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SRE On-Call Agent · 监控台</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <h1>SRE On-Call Agent</h1>
+      <span class="sub">AI 值班助手监控台</span>
+    </div>
+    <div id="status" class="status ok">● 服务正常</div>
+  </header>
+
+  <main class="layout">
+    <!-- ============ 左侧栏 ============ -->
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>事故选择</h2>
+        <div id="incidentList" class="incident-list"></div>
+        <button id="runBtn" class="btn-run" disabled>▶ 开始调查</button>
+      </section>
+
+      <section class="panel">
+        <h2>历史报告</h2>
+        <ul id="reportList" class="report-list"></ul>
+      </section>
+    </aside>
+
+    <!-- ============ 主内容区 ============ -->
+    <section class="content">
+      <nav class="tabs">
+        <button data-tab="live" class="active">实时追踪</button>
+        <button data-tab="report">复盘报告</button>
+      </nav>
+
+      <div id="live" class="tab-panel active">
+        <div id="console" class="console"></div>
+        <label class="scroll-toggle">
+          <input type="checkbox" id="autoscroll" checked> 自动滚动
+        </label>
+      </div>
+
+      <div id="report" class="tab-panel">
+        <div id="reportContent" class="report-content">
+          <div class="placeholder">调查完成后自动生成复盘报告</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
