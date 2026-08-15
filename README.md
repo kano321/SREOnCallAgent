@@ -26,6 +26,9 @@
 - [x] **密码找回**：通过用户自定义安全问题与答案
 - [x] **并发调查**：多个事故并行调查，各自独立卡片、进度条、可最小化控制台
 - [x] **重复打开去重**：再次打开已展开的历史报告时，直接滚动定位并高亮原卡片，不重复创建
+- [x] **历史报告搜索**：按事故关键词（incident_id / service / severity）模糊搜索
+- [x] **历史报告删除**：单条删除（悬停 🗑）与一键清空全部，均带二次确认
+- [x] **静态资源防缓存**：页面与静态文件禁用浏览器缓存（no-store），功能更新即时可见
 
 ## 🛠️ 技术栈
 
@@ -101,6 +104,8 @@ uvicorn src.api.main:app --reload --port 8000
   - 生成的复盘报告在 **复盘报告** 区域以 Markdown 渲染。
   - 每次完成的调查都会保存到 MySQL（`sre_agent.reports`）并出现在 **历史报告**
     列表中——点击即可重新打开；已打开的条目会滚动定位并高亮，不会重复创建。
+  - **历史报告管理**：支持按事故关键词**搜索**（输入自动搜索或点「搜索」按钮）、
+    单条**删除**（悬停 🗑）与一键**清空全部**（操作均需二次确认，删除不可恢复）。
 
 API 端点一览：
 
@@ -119,8 +124,10 @@ API 端点一览：
 | `POST` | `/incidents/investigate` | 同步运行完整三阶段流水线（需认证） |
 | `GET` | `/incidents/investigate/stream?incident_id=...&token=...` | SSE 流式运行流水线（需认证） |
 | `GET` | `/incidents/{id}/report` | 获取本次会话生成的报告（需认证） |
-| `GET` | `/incidents/reports` | 历史报告列表（需认证） |
+| `GET` | `/incidents/reports` | 历史报告列表，支持 `?keyword=` 搜索（需认证） |
 | `GET` | `/incidents/reports/{rid}` | 按运行 id 获取历史报告（需认证） |
+| `DELETE` | `/incidents/reports/{rid}` | 按运行 id 删除单条历史报告（需认证） |
+| `DELETE` | `/incidents/reports` | 清空全部历史报告（需认证，不可恢复） |
 
 ## 📖 使用示例
 
@@ -201,7 +208,14 @@ curl http://localhost:8000/incidents/db_pool_exhaustion/report
 
 > 记录本项目各阶段的功能迭代，便于了解项目演进历史。
 
-- **2026-08 重大迭代（本仓库维护者）**
+- **2026-08 迭代二：历史报告管理与稳定性修复**
+  - 历史报告支持关键词搜索（输入防抖 + 搜索按钮）、单条删除、一键清空（二次确认）
+  - 静态资源禁用浏览器缓存（no-store），前端功能更新即时可见
+  - 修复 Agent 调试打印在 GBK 控制台触发 UnicodeEncodeError 导致调查中断的问题
+    （Agent 打印收归 verbose 控制 + stdout/stderr 强制 UTF-8 输出）
+  - 修复历史报告详情接口 DATE_FORMAT 单 `%` 导致的 500 错误
+  - SQLite 时代的历史报告已一次性迁移至 MySQL（原 `data/reports.db`）
+- **2026-08 迭代一：监控台与存储层升级（本仓库维护者）**
   - 前端监控台上线：并发调查卡片、实时进度条、卡片最小化、重复打开自动跳转去重
   - 用户认证系统：注册 / 登录 / 登出 / 安全问题找回密码，PBKDF2 加盐哈希
   - 存储层从 SQLite 迁移到 MySQL：新增 `src/api/db.py` 统一封装，三张表启动自动建表
