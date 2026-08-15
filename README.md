@@ -230,7 +230,7 @@ curl http://localhost:8000/incidents/db_pool_exhaustion/report
 
 ## 📄 许可证
 
-MIT License
+Apache License 2.0
 
 ## 👤 作者
 
