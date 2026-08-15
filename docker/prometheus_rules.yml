@@ -1,0 +1,44 @@
+# Prometheus alert rules for the demo services (P0②).
+# 三条规则分别对应三个剧本事故的故障模式，触发后由 Alertmanager
+# 通过 webhook 推送给 SRE On-Call Agent 自动触发调查。
+groups:
+  - name: demo-sre
+    rules:
+      - alert: DBConnectionPoolSaturation
+        expr: db_pool_active_connections > 8
+        for: 1m
+        labels:
+          severity: P1
+          service: checkout-service
+        annotations:
+          summary: "DB 连接池饱和"
+          description: "checkout-service 数据库连接池占用超过 8/10 且持续 1 分钟，请求开始排队"
+          value: "{{ $value }}"
+          threshold: "8"
+          unit: "connections"
+
+      - alert: PodMemoryHigh
+        expr: pod_memory_usage_percent > 85
+        for: 1m
+        labels:
+          severity: P1
+          service: auth-service
+        annotations:
+          summary: "Pod 内存接近 OOM"
+          description: "auth-service 内存使用率超过 85% 且持续 1 分钟，存在 OOM 风险"
+          value: "{{ $value }}"
+          threshold: "85"
+          unit: "percent"
+
+      - alert: PaymentSuccessRateLow
+        expr: payment_success_rate < 95
+        for: 1m
+        labels:
+          severity: P2
+          service: payment-service
+        annotations:
+          summary: "支付成功率低于 SLO"
+          description: "payment-service 支付成功率低于 95% 且持续 1 分钟，疑似上游限流"
+          value: "{{ $value }}"
+          threshold: "95"
+          unit: "percent"

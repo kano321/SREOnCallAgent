@@ -30,7 +30,7 @@ Follow the investigation plan step by step. For each step:
 1. Thought: Reason about what you know and what to investigate next.
 2. Action: Call ONE tool using this EXACT format: tool_name[query string]
    - log_search[keyword or regex]
-   - metric_query[metric name keyword]
+   - metric_query[metric name keyword]  (simple keyword only — do NOT write PromQL, labels or [30m] ranges)
    - runbook_lookup[error pattern keyword]
 3. After all plan steps are complete, write: Finish[your root cause conclusion]
 
@@ -230,13 +230,15 @@ class InvestigationAgent:
 
     def _parse_react_output(self, text: str):
         thought_match = re.search(r"Thought:\s*(.*?)(?=\nAction:|$)", text, re.DOTALL)
-        action_match = re.search(r"Action:\s*(.*?)$", text, re.DOTALL)
+        # Action 只取第一行：LLM 偶尔会在一次响应里写多个 Action，
+        # 若用 DOTALL 贪婪匹配会把后续 Thought/Action 全部吞进 query。
+        action_match = re.search(r"Action:\s*([^\n]*)", text)
         thought = thought_match.group(1).strip() if thought_match else None
         action = action_match.group(1).strip() if action_match else None
         return thought, action
 
     def _parse_tool_call(self, action_text: str):
-        match = re.match(r"(\w+)\[(.*)\]", action_text, re.DOTALL)
+        match = re.match(r"(\w+)\[(.*?)\]", action_text, re.DOTALL)
         if match:
             return match.group(1).strip(), match.group(2).strip()
         return None, None

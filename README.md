@@ -88,6 +88,25 @@ jupyter lab
 # 打开 main.ipynb 依次运行全部单元格
 ```
 
+### 启动 Prometheus 演示监控栈（可选，P0①/②）
+
+`metric_query` 工具默认查询 **Prometheus**（真实指标后端），连不上时自动降级为剧本模拟数据。
+项目自带演示数据源 `docker/demo_exporter.py`：模拟三个服务（checkout/auth/payment）持续输出指标，
+每 15 分钟循环一次「基线 → 恶化 → 饱和」故障曲线，供 Agent 在告警前 30 分钟窗口内观察完整趋势。
+
+```bash
+docker compose up -d     # Prometheus + Alertmanager + demo-exporter
+# Prometheus UI: http://localhost:9090
+# Alertmanager UI: http://localhost:9093
+```
+
+- P0② 已内置告警规则（`docker/prometheus_rules.yml`）：连接池饱和 / 内存接近 OOM / 支付成功率过低
+  触发后 Alertmanager 经 webhook 自动推送本项目 → 自动触发三阶段调查，进度实时广播到前端「实时告警」面板
+- webhook token 默认 `sre-webhook-dev`（`WEBHOOK_TOKEN` 环境变量可覆盖，需与 `docker/alertmanager.yml` 同步）
+- 窗口绑定：`metric_query` 查询「告警时间前 30 分钟」；剧本事故（历史时间戳）自动回退当前时间
+
+环境变量：`PROMETHEUS_URL`（默认 `http://localhost:9090`）、`PROMETHEUS_TIMEOUT`（默认 5s）。
+
 ### 启动 FastAPI 服务
 
 ```bash
@@ -128,6 +147,8 @@ API 端点一览：
 | `GET` | `/incidents/reports/{rid}` | 按运行 id 获取历史报告（需认证） |
 | `DELETE` | `/incidents/reports/{rid}` | 按运行 id 删除单条历史报告（需认证） |
 | `DELETE` | `/incidents/reports` | 清空全部历史报告（需认证，不可恢复） |
+| `POST` | `/webhook/alert` | Alertmanager 告警 webhook：token 校验 → 自动触发调查（返回 202） |
+| `GET` | `/webhook/events` | 全局告警事件流 SSE（需认证）：新告警 + 自动调查进度实时推送 |
 
 ## 📖 使用示例
 
@@ -199,7 +220,9 @@ curl http://localhost:8000/incidents/db_pool_exhaustion/report
 
 - [x] SSE 实时流：将 Agent 推理过程实时推送到前端
 - [x] 前端监控台：事故选择器 + 实时追踪 + Markdown 查看器（原生 JS 已上线；框架升级可选）
-- [ ] 真实日志接入：对接 Loki / CloudWatch / Datadog
+- [x] 真实指标接入（P0①）：`metric_query` 已接 Prometheus（告警前 30 分钟窗口 + 模拟数据降级），配套 docker-compose 演示栈
+- [x] 告警自动触发调查（P0②）：`/webhook/alert` 接收 Alertmanager 告警（token 校验 + 同源去重 + 自动调查），前端实时告警列表（SSE）
+- [ ] 真实日志接入：对接 Loki / CloudWatch / Datadog（P0③）
 - [ ] 向量记忆：对历史 RCA 报告做向量化，加速后续调查
 - [ ] 安全的 runbook 执行：让 Agent 执行低风险修复命令
 - [ ] Prometheus `/metrics` 端点 + Grafana 监控面板

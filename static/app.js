@@ -436,6 +436,92 @@ async function loadReport(id) {
   card.querySelector(".run-report").open = true;
 }
 
+/* ---------------- 实时告警面板（P0②：webhook 自动调查） ---------------- */
+
+const alertEls = new Map();  // incident_id -> { item, console }
+
+function alertItemHtml(a) {
+  return (
+    `<div class="alert-head">` +
+    `<span class="sev ${esc(a.severity)}">${esc(a.severity)}</span>` +
+    `<span class="alert-name">${esc(a.metric)}</span>` +
+    `<span class="alert-svc">${esc(a.service)}</span>` +
+    `<span class="alert-status">⏳ 调查中…</span>` +
+    `</div>` +
+    `<div class="alert-desc">${esc(a.description || "")}</div>` +
+    `<div class="alert-console"></div>`
+  );
+}
+
+function handleAlertEvent(ev) {
+  if (ev.type === "connected") return;
+
+  if (ev.type === "alert") {
+    const list = $("#alertList");
+    const empty = list.querySelector(".report-empty");
+    if (empty) empty.remove();
+    const item = document.createElement("div");
+    item.className = "alert-item";
+    item.innerHTML = alertItemHtml(ev.incident);
+    item.onclick = () => item.classList.toggle("open");
+    list.prepend(item);
+    alertEls.set(ev.incident.incident_id, {
+      item,
+      console: item.querySelector(".alert-console"),
+      statusEl: item.querySelector(".alert-status"),
+    });
+    return;
+  }
+
+  const entry = alertEls.get(ev.incident_id);
+  if (!entry) return;
+  const consoleEl = entry.console;
+  const line = (cls, html) => {
+    const div = document.createElement("div");
+    div.className = "aline " + cls;
+    div.innerHTML = html;
+    consoleEl.appendChild(div);
+  };
+
+  switch (ev.type) {
+    case "plan":
+      line("plan-title", `📋 调查计划（${ev.steps.length} 步）`);
+      ev.steps.forEach((s, i) =>
+        line("plan", `${i + 1}. [${esc(s.tool)}] ${esc(s.query)}`));
+      break;
+    case "step":
+      if (ev.thought)     line("thought", `💭 ${esc(ev.thought)}`);
+      if (ev.action)      line("action", `🔧 ${esc(ev.action)}`);
+      if (ev.observation) line("observation", `👀 ${esc(ev.observation)}`);
+      break;
+    case "root_cause":
+      line("root-cause", `✅ 根因确认：${esc(ev.conclusion)}`);
+      break;
+    case "report":
+      entry.statusEl.textContent = "📄 报告已生成";
+      break;
+    case "alert_done":
+      entry.statusEl.className = "alert-status done";
+      entry.statusEl.textContent = "✅ 调查完成";
+      line("done", `🏁 根因：${esc(ev.root_cause)}`);
+      break;
+    case "alert_error":
+      entry.statusEl.className = "alert-status err";
+      entry.statusEl.textContent = "❌ 调查失败";
+      line("error", `❌ ${esc(ev.message)}`);
+      break;
+  }
+}
+
+function connectAlertFeed() {
+  const es = new EventSource("/webhook/events?token=" + encodeURIComponent(token()));
+  es.onmessage = (e) => {
+    try { handleAlertEvent(JSON.parse(e.data)); } catch (_) { /* 忽略坏消息 */ }
+  };
+  // EventSource 断线自动重连；页面刷新时清掉旧条目引用
+  window.addEventListener("beforeunload", () => es.close());
+}
+
 /* ---------------- 健康探测 ---------------- */
 
 async function pollHealth() {
@@ -458,5 +544,6 @@ $("#runBtn").onclick = runInvestigation;
 
 loadIncidents();
 loadReports();
+connectAlertFeed();
 pollHealth();
 setInterval(pollHealth, 15000);

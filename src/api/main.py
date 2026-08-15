@@ -15,12 +15,14 @@ Endpoints:
 """
 import asyncio
 import json
+import os
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, List
 
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,6 +70,175 @@ app.include_router(auth_router)
 
 # In-memory store for this session's reports (SQLite keeps the full history)
 _report_store: Dict[str, Any] = {}
+
+# ---------------------------------------------------------------------------
+# Webhook alert feed (P0②) — Alertmanager → POST /webhook/alert →
+# 自动触发调查 → 事件广播到 /webhook/events (SSE)，前端实时告警列表
+# ---------------------------------------------------------------------------
+WEBHOOK_TOKEN: str = os.getenv("WEBHOOK_TOKEN", "sre-webhook-dev")
+
+_alert_subscribers: List[asyncio.Queue] = []  # SSE 订阅队列
+_alert_running: Dict[str, bool] = {}          # fingerprint -> 是否已在调查（风暴去重，简化版）
+_main_loop: asyncio.AbstractEventLoop = None
+
+
+@app.on_event("startup")
+async def _capture_loop() -> None:
+    """记录主事件循环引用，供后台线程安全地投递事件。"""
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+
+
+def _broadcast(event: Dict[str, Any]) -> None:
+    """主循环内调用：把事件推给所有订阅者。"""
+    for q in list(_alert_subscribers):
+        q.put_nowait(event)
+
+
+def _broadcast_from_thread(event: Dict[str, Any]) -> None:
+    """后台调查线程调用：跨线程安全投递。"""
+    if _main_loop:
+        _main_loop.call_soon_threadsafe(_broadcast, event)
+
+
+def _alert_to_incident(
+    alert: Dict[str, Any],
+    common_labels: Dict[str, Any],
+    common_annotations: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Alertmanager 告警 → 本项目 incident 字典（Agent 流水线输入格式）。"""
+    labels = {**common_labels, **alert.get("labels", {})}
+    annotations = {**common_annotations, **alert.get("annotations", {})}
+    fingerprint = alert.get("fingerprint") or ""
+    alertname = labels.get("alertname", "unknown_alert")
+    return {
+        "incident_id": f"alert-{(fingerprint[:12] if fingerprint else alertname)}",
+        "service": labels.get("service", "unknown"),
+        "severity": labels.get("severity", "P2"),
+        "alert": {
+            "metric": alertname,
+            "value": annotations.get("value") or labels.get("value", "N/A"),
+            "threshold": annotations.get("threshold", "N/A"),
+            "unit": annotations.get("unit", ""),
+            "timestamp": alert.get("startsAt", ""),
+            "description": annotations.get("description")
+            or annotations.get("summary", ""),
+        },
+        # 真实数据链路：logs 待 P0③ 接 Loki，metrics 已由 metric_query 走 Prometheus
+        "logs": [],
+        "metrics": {},
+    }
+
+
+def _run_alert_investigation(incident: Dict[str, Any], fingerprint: str) -> None:
+    """后台线程：跑完整三阶段流水线并广播进度事件。"""
+    def emit(event: Dict[str, Any]) -> None:
+        event = dict(event)
+        event["incident_id"] = incident["incident_id"]
+        _broadcast_from_thread(event)
+
+    try:
+        result = run_pipeline(
+            incident["incident_id"], verbose=False, emit=emit, incident=incident
+        )
+        _report_store[incident["incident_id"]] = result
+        _save_report(result)
+        emit({"type": "alert_done", "root_cause": result["findings"]["root_cause"]})
+    except Exception as e:
+        emit({"type": "alert_error", "message": str(e)})
+    finally:
+        _alert_running.pop(fingerprint, None)
+
+
+class AlertWebhookPayload(BaseModel):
+    status: str = ""
+    alerts: List[Dict[str, Any]] = []
+    groupLabels: Dict[str, Any] = {}
+    commonLabels: Dict[str, Any] = {}
+    commonAnnotations: Dict[str, Any] = {}
+    externalURL: str = ""
+
+
+@app.post("/webhook/alert")
+async def alert_webhook(payload: AlertWebhookPayload, request: Request):
+    """
+    Alertmanager webhook 接收端点：校验 token → 转换告警 → 自动触发调查（异步）。
+
+    - 请求头需带 X-Webhook-Token（默认 sre-webhook-dev，可用 WEBHOOK_TOKEN 覆盖）
+    - 返回 202，调查在后台线程运行，进度通过 GET /webhook/events 广播
+    """
+    token = request.headers.get("X-Webhook-Token", "") or request.query_params.get(
+        "token", ""
+    )
+    if token != WEBHOOK_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
+
+    started: List[str] = []
+    for alert in payload.alerts:
+        if alert.get("status") == "resolved":
+            continue  # 只对 firing 告警自动调查
+        incident = _alert_to_incident(
+            alert, payload.commonLabels, payload.commonAnnotations
+        )
+        fingerprint = alert.get("fingerprint") or incident["incident_id"]
+        if _alert_running.get(fingerprint):
+            continue  # 同源告警去重：已在调查中则跳过（P1 完整风暴合并前的最小版）
+        _alert_running[fingerprint] = True
+        _broadcast_from_thread(
+            {
+                "type": "alert",
+                "incident": {
+                    "incident_id": incident["incident_id"],
+                    "service": incident["service"],
+                    "severity": incident["severity"],
+                    "metric": incident["alert"]["metric"],
+                    "value": incident["alert"]["value"],
+                    "description": incident["alert"]["description"],
+                    "timestamp": incident["alert"]["timestamp"],
+                },
+            }
+        )
+        threading.Thread(
+            target=_run_alert_investigation, args=(incident, fingerprint), daemon=True
+        ).start()
+        started.append(incident["incident_id"])
+
+    return {"ok": True, "started": started, "status": "investigation_started"}
+
+
+@app.get("/webhook/events")
+async def alert_events(user: str = Depends(get_current_user)):
+    """
+    全局告警事件流（SSE）：webhook 接收的告警 + 自动调查的每一步进度。
+    事件类型：connected / alert / stage / plan / step / root_cause /
+              draft / critique / revise / report / alert_done / alert_error
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    _alert_subscribers.append(queue)
+
+    async def gen() -> AsyncIterator[str]:
+        try:
+            yield _sse({"type": "connected", "message": "alert feed ready"})
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield _sse(event)
+        finally:
+            if queue in _alert_subscribers:
+                _alert_subscribers.remove(queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
