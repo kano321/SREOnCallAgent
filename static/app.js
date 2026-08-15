@@ -351,23 +351,70 @@ async function loadIncidents() {
   });
 }
 
-async function loadReports() {
-  const res = await authFetch("/incidents/reports");
+async function loadReports(keyword) {
+  const q = keyword ? `?keyword=${encodeURIComponent(keyword)}` : "";
+  const res = await authFetch("/incidents/reports" + q);
   if (!res.ok) return;
   const data = await res.json();
   const ul = $("#reportList");
   ul.innerHTML = "";
+  if (data.reports.length === 0) {
+    const li = document.createElement("li");
+    li.className = "report-empty";
+    li.textContent = keyword ? "没有匹配的历史报告" : "暂无历史报告";
+    ul.appendChild(li);
+    return;
+  }
   data.reports.forEach((r) => {
     const li = document.createElement("li");
     li.className = "report-item";
     li.innerHTML =
       `<span class="sev ${esc(r.severity)}">${esc(r.severity)}</span> ` +
       `${esc(r.incident_id)} · ${esc(r.service)}` +
-      `<small>${esc(r.created_at)}</small>`;
+      `<small>${esc(r.created_at)}</small>` +
+      `<button class="report-del" title="删除该报告">🗑</button>`;
     li.onclick = () => loadReport(r.id);
+    li.querySelector(".report-del").onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`确定删除报告「${r.incident_id} · ${r.created_at}」？删除后不可恢复。`)) {
+        return;
+      }
+      const del = await authFetch(`/incidents/reports/${r.id}`, { method: "DELETE" });
+      if (!del.ok) return;
+      // 若该报告正以卡片打开，一并关闭
+      const openRunId = findRunByRef("hist-" + r.id);
+      if (openRunId !== null) closeRun(openRunId);
+      loadReports($("#reportSearch").value.trim());
+    };
     ul.appendChild(li);
   });
 }
+
+/* 搜索：输入防抖 300ms 后按关键词重新加载（也可点「搜索」按钮立即触发） */
+let searchTimer = null;
+$("#reportSearch").oninput = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    loadReports($("#reportSearch").value.trim());
+  }, 300);
+};
+$("#searchBtn").onclick = () => {
+  clearTimeout(searchTimer);
+  loadReports($("#reportSearch").value.trim());
+};
+
+/* 清空全部历史报告（永久删除，二次确认） */
+$("#clearReportsBtn").onclick = async () => {
+  if (!confirm("确定清空全部历史报告？此操作不可恢复！")) return;
+  const res = await authFetch("/incidents/reports", { method: "DELETE" });
+  if (!res.ok) return;
+  // 关闭所有已打开的历史报告卡片
+  [...state.runs.keys()].forEach((runId) => {
+    const run = state.runs.get(runId);
+    if (run && run.ref && run.ref.startsWith("hist-")) closeRun(runId);
+  });
+  loadReports();
+};
 
 async function loadReport(id) {
   // 同一历史报告已打开 → 直接跳转过去，不重复开卡片

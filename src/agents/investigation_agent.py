@@ -66,10 +66,12 @@ class InvestigationAgent:
         incident: Dict[str, Any],
         runbooks_dir: str,
         emit: EventCallback = None,
+        verbose: bool = True,
     ):
         self.llm = llm
         self.incident = incident
         self.emit = emit
+        self.verbose = verbose
 
         log_tool = LogSearchTool(incident)
         metric_tool = MetricQueryTool(incident)
@@ -93,6 +95,11 @@ class InvestigationAgent:
             "runbook_steps": [],
         }
 
+        def log(*args: Any) -> None:
+            """仅 verbose 模式下输出调试信息，避免污染服务日志/触发编码错误。"""
+            if self.verbose:
+                print(*args)
+
         incident_summary = json.dumps(
             {
                 "incident_id": self.incident["incident_id"],
@@ -113,12 +120,12 @@ class InvestigationAgent:
             for i, s in enumerate(plan)
         )
 
-        print("\n" + "=" * 60)
-        print("🔍 STAGE 2: INVESTIGATION — ReAct tool loop")
-        print("=" * 60)
+        log("\n" + "=" * 60)
+        log("🔍 STAGE 2: INVESTIGATION — ReAct tool loop")
+        log("=" * 60)
 
         for step_num in range(1, max_steps + 1):
-            print(f"\n--- Step {step_num} ---")
+            log(f"\n--- Step {step_num} ---")
 
             prompt = REACT_PROMPT.format(
                 incident_summary=incident_summary,
@@ -130,14 +137,14 @@ class InvestigationAgent:
 
             response = self.llm.think(messages=messages)
             if not response:
-                print("⚠️  Empty LLM response, stopping.")
+                log("⚠️  Empty LLM response, stopping.")
                 break
 
             thought, action = self._parse_react_output(response)
             if thought:
-                print(f"💭 Thought: {thought}")
+                log(f"💭 Thought: {thought}")
             if not action:
-                print("⚠️  No action parsed, stopping.")
+                log("⚠️  No action parsed, stopping.")
                 if self.emit:
                     self.emit({
                         "type": "step",
@@ -150,7 +157,7 @@ class InvestigationAgent:
 
             if action.lower().startswith("finish"):
                 conclusion = self._extract_action_input(action)
-                print(f"\n✅ Root cause identified: {conclusion}")
+                log(f"\n✅ Root cause identified: {conclusion}")
                 findings["root_cause"] = conclusion
                 if self.emit:
                     self.emit({"type": "root_cause", "conclusion": conclusion})
@@ -159,7 +166,7 @@ class InvestigationAgent:
             tool_name, query = self._parse_tool_call(action)
             if not tool_name:
                 observation = f"Invalid action format '{action}'"
-                print(f"⚠️  {observation}")
+                log(f"⚠️  {observation}")
                 history.append(f"Observation: {observation}")
                 if self.emit:
                     self.emit({
@@ -174,7 +181,7 @@ class InvestigationAgent:
             action_key = f"{tool_name}[{query}]"
             if action_key in called_actions:
                 hint = "You already called this tool with this query. Use Finish[<conclusion>] to state your root cause."
-                print(f"⚠️  Duplicate action skipped — {hint}")
+                log(f"⚠️  Duplicate action skipped — {hint}")
                 history.append(f"Action: {action}")
                 history.append(f"Observation: {hint}")
                 if self.emit:
@@ -188,9 +195,9 @@ class InvestigationAgent:
                 continue
 
             called_actions.add(action_key)
-            print(f"🔧 Action: {tool_name}[{query}]")
+            log(f"🔧 Action: {tool_name}[{query}]")
             observation = self._execute_tool(tool_name, query, findings)
-            print(f"👀 Observation: {observation[:300]}{'...' if len(observation) > 300 else ''}")
+            log(f"👀 Observation: {observation[:300]}{'...' if len(observation) > 300 else ''}")
 
             history.append(f"Action: {action}")
             history.append(f"Observation: {observation}")

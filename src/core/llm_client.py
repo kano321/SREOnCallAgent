@@ -51,5 +51,6 @@ class HelloAgentsLLM:
                 print()
             return "".join(collected)
         except Exception as e:
-            print(f"❌ LLM API error: {e}")
+            if self.verbose:
+                print(f"❌ LLM API error: {e}")
             return ""

@@ -60,19 +60,19 @@ def run_pipeline(
 
     # Stage 1: Triage — Plan-and-Solve
     _emit(emit, {"type": "stage", "stage": 1, "name": "TRIAGE", "status": "start"})
-    triage = TriageAgent(llm, emit=emit)
+    triage = TriageAgent(llm, emit=emit, verbose=verbose)
     plan = triage.run(incident)
     _emit(emit, {"type": "stage", "stage": 1, "name": "TRIAGE", "status": "end"})
 
     # Stage 2: Investigation — ReAct
     _emit(emit, {"type": "stage", "stage": 2, "name": "INVESTIGATION", "status": "start"})
-    investigator = InvestigationAgent(llm, incident, str(RUNBOOKS_DIR), emit=emit)
+    investigator = InvestigationAgent(llm, incident, str(RUNBOOKS_DIR), emit=emit, verbose=verbose)
     findings = investigator.run(plan)
     _emit(emit, {"type": "stage", "stage": 2, "name": "INVESTIGATION", "status": "end"})
 
     # Stage 3: Post-mortem — Reflection
     _emit(emit, {"type": "stage", "stage": 3, "name": "POST-MORTEM", "status": "start"})
-    postmortem = PostmortemAgent(llm, emit=emit)
+    postmortem = PostmortemAgent(llm, emit=emit, verbose=verbose)
     report = postmortem.run(incident, findings)
     _emit(emit, {"type": "stage", "stage": 3, "name": "POST-MORTEM", "status": "end"})
 

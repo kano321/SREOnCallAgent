@@ -15,6 +15,7 @@ Endpoints:
 """
 import asyncio
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict
@@ -28,6 +29,13 @@ from pydantic import BaseModel
 from src.agents.pipeline import run_pipeline, list_incidents, load_incident
 from src.api.auth import router as auth_router, get_current_user
 from src.api import db
+
+# 兜底：无论控制台/重定向使用何种编码（如 Windows GBK），
+# 强制 stdout/stderr 按 UTF-8 输出，避免 emoji/中文打印触发 UnicodeEncodeError。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
@@ -43,6 +51,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """静态资源与页面响应禁用缓存，确保前端更新后浏览器立即拿到最新版本
+    （避免用户看到旧页面，误以为功能没上线）。"""
+    response = await call_next(request)
+    if request.url.path.startswith(("/static/", "/login.html", "/")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 app.include_router(auth_router)
 
@@ -214,14 +234,35 @@ def get_report(incident_id: str, user: str = Depends(get_current_user)):
 
 
 @app.get("/incidents/reports")
-def list_reports(user: str = Depends(get_current_user)):
-    """List all historical reports (newest first)."""
-    rows = db.query(
+def list_reports(
+    keyword: str = Query("", max_length=64),
+    user: str = Depends(get_current_user),
+):
+    """List historical reports (newest first); optional keyword filters
+    incident_id / service / severity."""
+    select = (
         "SELECT id, incident_id, service, severity, "
         "DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
-        "FROM reports ORDER BY id DESC"
+        "FROM reports"
     )
+    kw = keyword.strip()
+    if kw:
+        like = f"%{kw}%"
+        rows = db.query(
+            select + " WHERE incident_id LIKE %s OR service LIKE %s OR severity LIKE %s "
+            "ORDER BY id DESC",
+            (like, like, like),
+        )
+    else:
+        rows = db.query(select + " ORDER BY id DESC")
     return {"reports": rows}
+
+
+@app.delete("/incidents/reports")
+def delete_all_reports(user: str = Depends(get_current_user)):
+    """Delete ALL historical reports (permanent)."""
+    affected = db.execute("DELETE FROM reports")
+    return {"ok": True, "deleted": affected}
 
 
 @app.get("/incidents/reports/{rid}")
@@ -244,6 +285,15 @@ def get_report_by_id(rid: int, user: str = Depends(get_current_user)):
         "created_at": row["created_at"],
         "payload": json.loads(row["payload"]),
     }
+
+
+@app.delete("/incidents/reports/{rid}")
+def delete_report_by_id(rid: int, user: str = Depends(get_current_user)):
+    """Delete one historical report by its run id (permanent)."""
+    affected = db.execute("DELETE FROM reports WHERE id = %s", (rid,))
+    if not affected:
+        raise HTTPException(status_code=404, detail=f"No report with id {rid}")
+    return {"ok": True, "deleted_id": rid}
 
 
 # Mount static assets last so /static/* never shadows API routes

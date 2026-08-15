@@ -44,9 +44,15 @@ class TriageAgent:
     a structured plan that the InvestigationAgent will execute step-by-step.
     """
 
-    def __init__(self, llm: HelloAgentsLLM, emit: EventCallback = None):
+    def __init__(self, llm: HelloAgentsLLM, emit: EventCallback = None, verbose: bool = True):
         self.llm = llm
         self.emit = emit
+        self.verbose = verbose
+
+    def log(self, *args: Any) -> None:
+        """仅 verbose 模式下向控制台输出调试信息，避免污染服务日志/触发编码错误。"""
+        if self.verbose:
+            print(*args)
 
     def run(self, incident: Dict[str, Any]) -> List[Dict[str, str]]:
         alert_summary = {
@@ -58,19 +64,19 @@ class TriageAgent:
         prompt = TRIAGE_PROMPT.format(alert_json=json.dumps(alert_summary, indent=2))
         messages = [{"role": "user", "content": prompt}]
 
-        print("\n" + "=" * 60)
-        print("🚨 STAGE 1: TRIAGE — Generating investigation plan")
-        print("=" * 60)
+        self.log("\n" + "=" * 60)
+        self.log("🚨 STAGE 1: TRIAGE — Generating investigation plan")
+        self.log("=" * 60)
 
         response = self.llm.think(messages=messages)
         plan = self._parse_plan(response)
 
         if plan:
-            print(f"\n✅ Investigation plan ({len(plan)} steps):")
+            self.log(f"\n✅ Investigation plan ({len(plan)} steps):")
             for i, step in enumerate(plan, 1):
-                print(f"   {i}. [{step['tool']}] {step['query']} — {step['reason']}")
+                self.log(f"   {i}. [{step['tool']}] {step['query']} — {step['reason']}")
         else:
-            print("⚠️  Could not parse structured plan; using fallback plan.")
+            self.log("⚠️  Could not parse structured plan; using fallback plan.")
             plan = self._fallback_plan(incident)
 
         if self.emit:

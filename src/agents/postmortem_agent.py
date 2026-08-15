@@ -86,15 +86,21 @@ class PostmortemAgent:
     then producing a final revised version.
     """
 
-    def __init__(self, llm: HelloAgentsLLM, max_revisions: int = 1, emit: EventCallback = None):
+    def __init__(self, llm: HelloAgentsLLM, max_revisions: int = 1, emit: EventCallback = None, verbose: bool = True):
         self.llm = llm
         self.max_revisions = max_revisions
         self.emit = emit
+        self.verbose = verbose
+
+    def log(self, *args: Any) -> None:
+        """仅 verbose 模式下输出调试信息，避免污染服务日志/触发编码错误。"""
+        if self.verbose:
+            print(*args)
 
     def run(self, incident: Dict[str, Any], findings: Dict[str, Any]) -> str:
-        print("\n" + "=" * 60)
-        print("📝 STAGE 3: POST-MORTEM — Reflection (draft → critique → revise)")
-        print("=" * 60)
+        self.log("\n" + "=" * 60)
+        self.log("📝 STAGE 3: POST-MORTEM — Reflection (draft → critique → revise)")
+        self.log("=" * 60)
 
         evidence_text = "\n\n".join(
             f"[{e['tool']}({e['query']})]:\n{e['result']}"
@@ -104,15 +110,15 @@ class PostmortemAgent:
         runbook_text = "\n\n".join(findings.get("runbook_steps", [])) or "No runbook consulted."
 
         draft = self._draft(incident, findings, evidence_text, runbook_text)
-        print("\n✍️  Draft post-mortem written.")
+        self.log("\n✍️  Draft post-mortem written.")
         if self.emit:
             self.emit({"type": "draft", "draft": draft})
 
         for revision in range(1, self.max_revisions + 1):
             critique = self._critique(draft)
-            print(f"\n🔍 Critique (revision {revision}):\n{critique[:500]}...")
+            self.log(f"\n🔍 Critique (revision {revision}):\n{critique[:500]}...")
             score = self._extract_score(critique)
-            print(f"   Quality score: {score}/10")
+            self.log(f"   Quality score: {score}/10")
             if self.emit:
                 self.emit({
                     "type": "critique",
@@ -122,16 +128,16 @@ class PostmortemAgent:
                 })
 
             if score >= 8:
-                print("✅ Quality threshold met — no revision needed.")
+                self.log("✅ Quality threshold met — no revision needed.")
                 break
 
-            print(f"   Revising post-mortem (score {score} < 8)...")
+            self.log(f"   Revising post-mortem (score {score} < 8)...")
             draft = self._revise(draft, critique)
-            print(f"   Revision {revision} complete.")
+            self.log(f"   Revision {revision} complete.")
             if self.emit:
                 self.emit({"type": "revise", "revision": revision})
 
-        print("\n✅ Final post-mortem ready.")
+        self.log("\n✅ Final post-mortem ready.")
         return draft
 
     def _draft(
