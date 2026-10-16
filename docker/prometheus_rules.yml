@@ -1,0 +1,41 @@
+groups:
+  - name: sre-oncall-demo
+    rules:
+      - alert: DBConnectionPoolSaturation
+        expr: db_pool_active_connections{service="checkout-service"} > 8
+        for: 30s
+        labels:
+          severity: P1
+          service: checkout-service
+        annotations:
+          summary: "DB connection pool saturation"
+          description: "checkout-service database pool usage is above 8 connections."
+          value: "{{ $value }}"
+          threshold: "8"
+          unit: "connections"
+
+      - alert: PodMemoryHigh
+        expr: pod_memory_usage_percent{service="auth-service"} > 85
+        for: 30s
+        labels:
+          severity: P1
+          service: auth-service
+        annotations:
+          summary: "Pod memory usage is high"
+          description: "auth-service memory usage is above 85 percent and may OOM."
+          value: "{{ $value }}"
+          threshold: "85"
+          unit: "percent"
+
+      - alert: PaymentSuccessRateLow
+        expr: payment_success_rate{service="payment-service"} < 95
+        for: 30s
+        labels:
+          severity: P2
+          service: payment-service
+        annotations:
+          summary: "Payment success rate is below SLO"
+          description: "payment-service success rate is below 95 percent."
+          value: "{{ $value }}"
+          threshold: "95"
+          unit: "percent"

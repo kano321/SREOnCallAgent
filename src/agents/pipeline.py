@@ -43,19 +43,22 @@ def run_pipeline(
     incident_id: str,
     verbose: bool = True,
     emit: EventCallback = None,
+    incident: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Full three-stage SRE pipeline for a given incident ID.
 
     Args:
-        incident_id: one of list_incidents()
+        incident_id: one of list_incidents(), or an id from an external alert
         verbose: whether the LLM client prints its streaming output to stdout
         emit: optional callback receiving streaming event dicts, e.g.
               {"type": "stage"|"plan"|"step"|"root_cause"|"draft"|"critique"|"report", ...}
+        incident: optional pre-built incident data. When omitted, the incident
+                  is loaded from data/incidents/{incident_id}.json.
 
     Returns a dict with: incident_id, plan, findings, report
     """
-    incident = load_incident(incident_id)
+    incident = incident if incident is not None else load_incident(incident_id)
     llm = HelloAgentsLLM(verbose=verbose)
 
     # Stage 1: Triage — Plan-and-Solve

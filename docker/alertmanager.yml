@@ -1,0 +1,22 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by:
+    - alertname
+    - service
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 5m
+  receiver: sre-oncall-agent
+
+receivers:
+  - name: sre-oncall-agent
+    webhook_configs:
+      - url: "http://host.docker.internal:8000/webhook/alert"
+        send_resolved: false
+        http_config:
+          http_headers:
+            X-Webhook-Token:
+              secrets:
+                - "sre-webhook-dev"

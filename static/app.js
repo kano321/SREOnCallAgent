@@ -438,6 +438,38 @@ async function loadReport(id) {
 
 /* ---------------- 健康探测 ---------------- */
 
+async function checkLLM() {
+  const btn = $("#llmCheckBtn");
+  const st = $("#llmStatus");
+  btn.disabled = true;
+  st.className = "status llm checking";
+  st.textContent = "● 检测中…";
+  st.title = "正在向模型发送一条最小请求，最长等待 45 秒";
+  try {
+    const res = await authFetch("/llm/check");
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) {
+      const shortModel = String(data.model || "unknown").split("/").pop();
+      st.className = "status ok";
+      st.textContent = "● 模型已连接 · " + shortModel + " · " +
+        (data.latency_ms / 1000).toFixed(2) + "s";
+      st.title = "模型: " + data.model + "\n接口地址: " + data.base_url +
+        "\n返回内容: " + data.reply + "\n耗时: " + data.latency_ms + "ms";
+    } else {
+      st.className = "status bad";
+      st.textContent = "● " + (data.message || "模型连接失败");
+      st.title = [data.hint, data.error || data.detail].filter(Boolean).join("\n");
+      console.error("LLM check failed:", data);
+    }
+  } catch (e) {
+    st.className = "status bad";
+    st.textContent = "● 检测请求失败";
+    st.title = String(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function pollHealth() {
   try {
     const res = await fetch("/health");
@@ -455,6 +487,7 @@ async function pollHealth() {
 if (!checkAuth()) throw new Error("not authenticated");
 
 $("#runBtn").onclick = runInvestigation;
+$("#llmCheckBtn").onclick = checkLLM;
 
 loadIncidents();
 loadReports();

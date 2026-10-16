@@ -56,6 +56,21 @@ body {
 }
 .btn-logout:hover { color: var(--err); border-color: var(--err); }
 
+.btn-llm {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-llm:hover:not(:disabled) { color: var(--ok); border-color: var(--ok); }
+.btn-llm:disabled { opacity: 0.5; cursor: default; }
+
+.status.llm          { color: var(--text-dim); border-color: var(--border); background: transparent; }
+.status.llm.checking { color: var(--warn); border-color: var(--warn); background: rgba(251, 191, 36, 0.08); }
+
 .status {
   padding: 5px 14px;
   border-radius: 20px;
