@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SRE On-Call Agent 项目全景图</title>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --bg-soft: #12151a;
+    --bg-raise: #181c23;
+    --line: #262c36;
+    --text: #e8edf2;
+    --text-dim: #9aa4b2;
+    --text-faint: #6b7482;
+    --rose: #fb7185;
+    --amber: #fbbf24;
+    --teal: #2dd4bf;
+    --sky: #7dd3fc;
+    --violet: #c4b5fd;
+    --green: #86efac;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.65;
+  }
+  .inner { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+  section { padding: 64px 0; }
+  section:nth-of-type(even) { background: var(--bg-soft); }
+
+  header { padding: 56px 0 48px; border-bottom: 1px solid var(--line); }
+  .kicker {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--rose); font-size: 13px; letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 14px;
+  }
+  .kicker svg { width: 16px; height: 16px; }
+  h1 { font-size: 40px; font-weight: 700; letter-spacing: 0; line-height: 1.2; }
+  .sub { color: var(--text-dim); font-size: 17px; margin-top: 14px; max-width: 760px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+  .badge {
+    font-size: 13px; padding: 5px 12px; border: 1px solid var(--line);
+    border-radius: 4px; color: var(--text-dim); background: var(--bg-raise);
+  }
+  .badge b { color: var(--text); font-weight: 600; }
+  a.repo {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 24px;
+    color: var(--sky); text-decoration: none; font-size: 14px;
+  }
+  a.repo:hover { text-decoration: underline; }
+  a.repo svg { width: 15px; height: 15px; }
+
+  h2 { font-size: 26px; font-weight: 700; margin-bottom: 8px; }
+  h2 .num { color: var(--text-faint); font-weight: 400; margin-right: 10px; }
+  .sec-desc { color: var(--text-dim); font-size: 15px; margin-bottom: 36px; max-width: 780px; }
+
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .panel { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-raise); overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    font-weight: 600; font-size: 15px;
+  }
+  .panel-head svg { width: 18px; height: 18px; }
+  .panel-head.human svg { color: var(--rose); }
+  .panel-head.agent svg { color: var(--teal); }
+  .panel-body { padding: 20px; }
+  .step-row { display: flex; gap: 14px; padding: 9px 0; align-items: flex-start; }
+  .step-idx {
+    flex: none; width: 24px; height: 24px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600; margin-top: 2px;
+  }
+  .human .step-idx { background: rgba(251,113,133,.12); color: var(--rose); }
+  .agent .step-idx { background: rgba(45,212,191,.12); color: var(--teal); }
+  .step-row .t { font-size: 14.5px; }
+  .step-row .t small { display: block; color: var(--text-faint); font-size: 12.5px; }
+  .panel-foot {
+    padding: 12px 20px; border-top: 1px solid var(--line);
+    font-size: 13px; color: var(--text-faint);
+  }
+  .panel-foot b { color: var(--text); }
+  .verdict {
+    margin-top: 28px; padding: 18px 22px; border-left: 3px solid var(--teal);
+    background: var(--bg-raise); border-radius: 0 8px 8px 0;
+    font-size: 15px; color: var(--text-dim);
+  }
+  .verdict b { color: var(--text); }
+
+  .pipe { display: flex; align-items: stretch; gap: 0; margin-bottom: 8px; }
+  .pnode {
+    flex: 1; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg-raise); padding: 18px 14px; text-align: center;
+    cursor: pointer; transition: border-color .15s, transform .15s;
+    position: relative;
+  }
+  .pnode:hover { border-color: var(--text-faint); }
+  .pnode.active { border-color: var(--sky); transform: translateY(-2px); }
+  .pnode.active-demo { border-color: var(--amber); }
+  .pnode .ic { display: flex; justify-content: center; margin-bottom: 10px; }
+  .pnode .ic svg { width: 26px; height: 26px; }
+  .pnode .name { font-weight: 600; font-size: 15px; }
+  .pnode .en { font-size: 11.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-faint); margin-top: 2px; }
+  .pnode .tag {
+    display: inline-block; margin-top: 10px; font-size: 11.5px;
+    padding: 2px 10px; border-radius: 999px;
+  }
+  .pnode .desc { font-size: 12.5px; color: var(--text-dim); margin-top: 8px; }
+  .parrow { flex: none; width: 34px; display: flex; align-items: center; justify-content: center; color: var(--text-faint); }
+  .parrow svg { width: 18px; height: 18px; }
+  .n-input .ic svg { color: var(--rose); }
+  .n-input .tag { background: rgba(251,113,133,.12); color: var(--rose); }
+  .n-triage .ic svg { color: var(--sky); }
+  .n-triage .tag { background: rgba(125,211,252,.12); color: var(--sky); }
+  .n-invest .ic svg { color: var(--teal); }
+  .n-invest .tag { background: rgba(45,212,191,.12); color: var(--teal); }
+  .n-post .ic svg { color: var(--violet); }
+  .n-post .tag { background: rgba(196,181,253,.14); color: var(--violet); }
+  .n-output .ic svg { color: var(--green); }
+  .n-output .tag { background: rgba(134,239,172,.12); color: var(--green); }
+  .pipe-hint { text-align: center; color: var(--text-faint); font-size: 13px; margin: 10px 0 24px; }
+
+  .stage-detail {
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg-raise); padding: 24px 26px;
+  }
+  .sd-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .sd-head h3 { font-size: 18px; }
+  .sd-head .paradigm { font-size: 12px; padding: 2px 10px; border-radius: 999px; }
+  .sd-body { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 14px; }
+  .sd-col h4 { font-size: 13px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .sd-col p, .sd-col li { font-size: 14px; color: var(--text-dim); }
+  .sd-col ul { padding-left: 18px; }
+  .sd-col li { margin-bottom: 6px; }
+  .sd-col li b { color: var(--text); font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  .chip {
+    font-size: 12.5px; padding: 3px 11px; border-radius: 4px;
+    background: var(--bg); border: 1px solid var(--line); color: var(--text-dim);
+  }
+  .sd-files { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .sd-files a {
+    font-family: Consolas, monospace; font-size: 12.5px; color: var(--sky);
+    text-decoration: none; border: 1px dashed var(--line); padding: 3px 10px; border-radius: 4px;
+  }
+  .sd-files a:hover { border-color: var(--sky); }
+
+  .react-loop { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .rl-chip { font-size: 13px; padding: 4px 13px; border-radius: 999px; font-weight: 500; }
+  .rl-chip.th { background: rgba(196,181,253,.14); color: var(--violet); }
+  .rl-chip.ac { background: rgba(45,212,191,.12); color: var(--teal); }
+  .rl-chip.ob { background: rgba(251,191,36,.12); color: var(--amber); }
+  .rl-arrow { color: var(--text-faint); display: flex; }
+  .rl-arrow svg { width: 14px; height: 14px; }
+
+  .demo-bar { display: flex; align-items: center; gap: 16px; margin-top: 28px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--teal); color: #06231f; border: none; border-radius: 6px;
+    padding: 10px 20px; font-size: 14.5px; font-weight: 600; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn svg { width: 16px; height: 16px; }
+  .demo-note { font-size: 13px; color: var(--text-faint); }
+  .terminal {
+    margin-top: 16px; border: 1px solid var(--line); border-radius: 8px;
+    background: #080a0d; font-family: Consolas, "Courier New", monospace;
+    font-size: 13px; min-height: 120px; max-height: 340px; overflow-y: auto;
+    padding: 16px 18px; display: none;
+  }
+  .terminal.on { display: block; }
+  .tline { padding: 3px 0; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; }
+  .tline .prefix { font-weight: 700; }
+  .tline.ev-alert { color: var(--rose); }
+  .tline.ev-stage { color: var(--sky); }
+  .tline.ev-plan { color: var(--sky); }
+  .tline.ev-thought .prefix { color: var(--violet); }
+  .tline.ev-action .prefix { color: var(--teal); }
+  .tline.ev-obs .prefix { color: var(--amber); }
+  .tline.ev-finish { color: var(--green); }
+  .tline.ev-report { color: var(--green); }
+
+  .layer {
+    display: grid; grid-template-columns: 150px 1fr; gap: 0;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg-raise); margin-bottom: 14px;
+  }
+  .layer-name {
+    padding: 18px; border-right: 1px solid var(--line);
+    border-radius: 8px 0 0 8px;
+    display: flex; flex-direction: column; gap: 6px; justify-content: center;
+  }
+  .layer-name .l-ic svg { width: 20px; height: 20px; }
+  .layer-name .l-t { font-weight: 600; font-size: 15px; }
+  .layer-name .l-e { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-faint); }
+  .layer-items { padding: 14px 18px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .layer-items { border-radius: 0 8px 8px 0; }
+  .titem {
+    font-size: 13px; padding: 5px 13px; border-radius: 4px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text-dim);
+    cursor: default; position: relative;
+  }
+  .titem:hover { border-color: var(--text-dim); color: var(--text); }
+  .titem .tip {
+    display: none; position: absolute; top: calc(100% + 8px); z-index: 30;
+    left: 50%; transform: translateX(-50%);
+    width: 300px; max-width: 82vw; padding: 10px 13px; border-radius: 6px;
+    background: #1c212b; border: 1px solid var(--text-faint);
+    color: var(--text); font-size: 12.5px; line-height: 1.55;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .titem:hover .tip { display: block; }
+  .ly-frontend .l-ic svg { color: var(--rose); }
+  .ly-api .l-ic svg { color: var(--sky); }
+  .ly-agent .l-ic svg { color: var(--teal); }
+  .ly-tool .l-ic svg { color: var(--amber); }
+  .ly-llm .l-ic svg { color: var(--violet); }
+  .ly-data .l-ic svg { color: var(--green); }
+
+  .case-tabs { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 22px; }
+  .ctab {
+    display: flex; align-items: center; gap: 9px;
+    border: 1px solid var(--line); background: var(--bg-raise);
+    color: var(--text-dim); border-radius: 6px; padding: 9px 16px;
+    font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  .ctab:hover { border-color: var(--text-faint); }
+  .ctab.on { border-color: var(--rose); color: var(--text); }
+  .ctab .sev { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 3px; }
+  .sev-p1 { background: rgba(251,113,133,.15); color: var(--rose); }
+  .sev-p2 { background: rgba(251,191,36,.15); color: var(--amber); }
+  .ev-chain { position: relative; padding-left: 26px; }
+  .ev-chain::before {
+    content: ""; position: absolute; left: 7px; top: 8px; bottom: 8px;
+    width: 2px; background: var(--line);
+  }
+  .ev-item { position: relative; padding-bottom: 22px; }
+  .ev-item:last-child { padding-bottom: 0; }
+  .ev-dot {
+    position: absolute; left: -26px; top: 5px; width: 16px; height: 16px;
+    border-radius: 50%; border: 2px solid var(--line); background: var(--bg);
+  }
+  .ev-item.k-alert .ev-dot { border-color: var(--rose); background: rgba(251,113,133,.2); }
+  .ev-item.k-log .ev-dot { border-color: var(--amber); background: rgba(251,191,36,.2); }
+  .ev-item.k-metric .ev-dot { border-color: var(--teal); background: rgba(45,212,191,.2); }
+  .ev-item.k-runbook .ev-dot { border-color: var(--sky); background: rgba(125,211,252,.2); }
+  .ev-item.k-cause .ev-dot { border-color: var(--green); background: rgba(134,239,172,.2); }
+  .ev-label {
+    font-size: 11.5px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--text-faint); margin-bottom: 4px; display: flex; align-items: center; gap: 8px;
+  }
+  .ev-label .kind-tag { letter-spacing: 0; text-transform: none; font-weight: 600; }
+  .k-alert .kind-tag { color: var(--rose); }
+  .k-log .kind-tag { color: var(--amber); }
+  .k-metric .kind-tag { color: var(--teal); }
+  .k-runbook .kind-tag { color: var(--sky); }
+  .k-cause .kind-tag { color: var(--green); }
+  .ev-item .ev-text { font-size: 14.5px; color: var(--text-dim); }
+  .ev-item .ev-text b { color: var(--text); }
+  .code {
+    display: block; font-family: Consolas, monospace; font-size: 12.5px;
+    background: #080a0d; border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 14px; margin-top: 8px; color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-all; line-height: 1.55;
+  }
+  .code .hl { color: var(--rose); }
+  .code .hlm { color: var(--teal); }
+
+  .prob { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-raise); margin-bottom: 12px; overflow: hidden; }
+  .prob-head {
+    width: 100%; display: flex; align-items: center; gap: 14px;
+    padding: 16px 20px; background: none; border: none; cursor: pointer;
+    text-align: left; color: var(--text); font-family: inherit; font-size: 15px; font-weight: 600;
+  }
+  .prob-head:hover { background: rgba(255,255,255,.02); }
+  .prob-head svg.chev { width: 16px; height: 16px; margin-left: auto; color: var(--text-faint); transition: transform .2s; flex: none; }
+  .prob.open .prob-head svg.chev { transform: rotate(180deg); }
+  .prob-ic {
+    flex: none; width: 34px; height: 34px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .prob-ic svg { width: 17px; height: 17px; }
+  .pi-1 { background: rgba(251,113,133,.12); color: var(--rose); }
+  .pi-2 { background: rgba(251,191,36,.12); color: var(--amber); }
+  .pi-3 { background: rgba(125,211,252,.12); color: var(--sky); }
+  .pi-4 { background: rgba(45,212,191,.12); color: var(--teal); }
+  .pi-5 { background: rgba(196,181,253,.14); color: var(--violet); }
+  .pi-6 { background: rgba(134,239,172,.12); color: var(--green); }
+  .pi-7 { background: rgba(251,146,60,.12); color: #fb923c; }
+  .prob-body { display: none; padding: 4px 20px 20px 68px; }
+  .prob.open .prob-body { display: block; }
+  .fix {
+    border-left: 3px solid var(--teal); padding: 10px 16px;
+    background: var(--bg); border-radius: 0 6px 6px 0; font-size: 14px; color: var(--text-dim);
+  }
+  .fix b { color: var(--text); }
+  .fix-src { margin-top: 10px; font-family: Consolas, monospace; font-size: 12px; color: var(--text-faint); }
+
+  footer { padding: 40px 0 56px; border-top: 1px solid var(--line); color: var(--text-faint); font-size: 13.5px; text-align: center; }
+  footer a { color: var(--sky); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  @media (max-width: 860px) {
+    .compare, .sd-body { grid-template-columns: 1fr; }
+    .pipe { flex-direction: column; }
+    .parrow { width: auto; height: 30px; transform: rotate(90deg); }
+    h1 { font-size: 30px; }
+    .layer { grid-template-columns: 1fr; }
+    .layer-name { flex-direction: row; align-items: center; border-right: none; border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; }
+    .layer-items { border-radius: 0 0 8px 8px; }
+    .prob-body { padding-left: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="inner">
+    <div class="kicker"><i data-lucide="siren"></i>PROJECT TOUR</div>
+    <h1>SRE On-Call Agent 项目全景图</h1>
+    <p class="sub">一个 AI 驱动的值班助手：把「告警分诊 → 证据调查 → 复盘报告」这套 SRE 排障流程，做成三阶段智能体流水线自动执行，过程实时可视化。</p>
+    <div class="badges">
+      <span class="badge"><b>Plan-and-Solve</b> 分诊</span>
+      <span class="badge"><b>ReAct</b> 调查</span>
+      <span class="badge"><b>Reflection</b> 复盘</span>
+      <span class="badge"><b>FastAPI</b> + SSE</span>
+      <span class="badge"><b>MySQL</b> 持久化</span>
+      <span class="badge"><b>3</b> 个真实故障样例</span>
+    </div>
+    <a class="repo" href="https://github.com/kano321/SREOnCallAgent" target="_blank"><i data-lucide="github"></i>github.com/kano321/SREOnCallAgent</a>
+  </div>
+</header>
+
+<section>
+  <div class="inner">
+    <h2><span class="num">01</span>这个项目是干什么的</h2>
+    <p class="sec-desc">凌晨 3 点生产告警响起，值班工程师要手动完成一整套重复劳动。这个项目把同样的流程交给智能体流水线，人只负责看结论、做决策。</p>
+    <div class="compare">
+      <div class="panel">
+        <div class="panel-head human"><i data-lucide="user"></i>传统值班：人工排障</div>
+        <div class="panel-body">
+          <div class="step-row"><div class="step-idx">1</div><div class="t">收到告警，打开日志平台<small>凭经验猜该先查什么</small></div></div>
+          <div class="step-row"><div class="step-idx">2</div><div class="t">翻日志找错误模式<small>关键词全靠试，容易漏</small></div></div>
+          <div class="step-row"><div class="step-idx">3</div><div class="t">切到监控查指标趋势<small>日志和指标两边来回切换</small></div></div>
+          <div class="step-row"><div class="step-idx">4</div><div class="t">翻 Runbook 找处置步骤<small>文档散落，现场紧张容易跳步</small></div></div>
+          <div class="step-row"><div class="step-idx">5</div><div class="t">手工写复盘报告<small>格式随意，质量看心情</small></div></div>
+        </div>
+        <div class="panel-foot">全程约 <b>30~60 分钟</b>，质量依赖个人经验</div>
+      </div>
+      <div class="panel">
+        <div class="panel-head agent"><i data-lucide="bot"></i>本项目：智能体流水线</div>
+        <div class="panel-body">
+          <div class="step-row"><div class="step-idx">1</div><div class="t">TriageAgent 读取告警 JSON<small>自动生成 4~6 步有序调查计划</small></div></div>
+          <div class="step-row"><div class="step-idx">2</div><div class="t">InvestigationAgent 循环取证<small>按计划调用日志/指标/Runbook 三个工具</small></div></div>
+          <div class="step-row"><div class="step-idx">3</div><div class="t">证据逐步收敛到根因<small>每一步 Thought/Action/Observation 都记录</small></div></div>
+          <div class="step-row"><div class="step-idx">4</div><div class="t">PostmortemAgent 起草 RCA 报告<small>7 节标准结构：时间线、5-Whys、行动项...</small></div></div>
+          <div class="step-row"><div class="step-idx">5</div><div class="t">自评审打分，不达标自动修订<small>存入 MySQL，历史随时可查</small></div></div>
+        </div>
+        <div class="panel-foot">分钟级完成，<b>过程全程可视化</b>，方法论一致</div>
+      </div>
+    </div>
+    <div class="verdict"><b>一句话：</b>它不是「让 AI 编答案」，而是把资深 SRE 的排障方法论（先看什么、再查什么、证据如何收敛）固化成可自动执行、可审计的流水线。</div>
+  </div>
+</section>
+
+<section>
+  <div class="inner">
+    <h2><span class="num">02</span>整体流程：三阶段流水线</h2>
+    <p class="sec-desc">点击任意阶段查看它具体做什么、用什么技术实现。也可以点下面的按钮，用真实故障 INC-001 的数据完整跑一遍，看事件是怎么流动的。</p>
+
+    <div class="pipe" id="pipe">
+      <div class="pnode n-input" data-stage="0">
+        <div class="ic"><i data-lucide="bell-ring"></i></div>
+        <div class="name">告警输入</div>
+        <div class="en">Incident JSON</div>
+        <span class="tag">原始数据</span>
+        <div class="desc">服务名 / 严重级别 / 告警详情 / 日志 / 指标</div>
+      </div>
+      <div class="parrow"><i data-lucide="chevron-right"></i></div>
+      <div class="pnode n-triage" data-stage="1">
+        <div class="ic"><i data-lucide="list-checks"></i></div>
+        <div class="name">分诊</div>
+        <div class="en">Triage</div>
+        <span class="tag">Plan-and-Solve</span>
+        <div class="desc">把告警变成有序调查计划</div>
+      </div>
+      <div class="parrow"><i data-lucide="chevron-right"></i></div>
+      <div class="pnode n-invest" data-stage="2">
+        <div class="ic"><i data-lucide="search"></i></div>
+        <div class="name">调查</div>
+        <div class="en">Investigation</div>
+        <span class="tag">ReAct</span>
+        <div class="desc">循环调用工具，证据收敛根因</div>
+      </div>
+      <div class="parrow"><i data-lucide="chevron-right"></i></div>
+      <div class="pnode n-post" data-stage="3">
+        <div class="ic"><i data-lucide="file-text"></i></div>
+        <div class="name">复盘</div>
+        <div class="en">Post-mortem</div>
+        <span class="tag">Reflection</span>
+        <div class="desc">起草报告，自评审，自动修订</div>
+      </div>
+      <div class="parrow"><i data-lucide="chevron-right"></i></div>
+      <div class="pnode n-output" data-stage="4">
+        <div class="ic"><i data-lucide="database"></i></div>
+        <div class="name">报告输出</div>
+        <div class="en">RCA Report</div>
+        <span class="tag">持久化</span>
+        <div class="desc">写入 MySQL，前端历史可查可搜</div>
+      </div>
+    </div>
+    <div class="pipe-hint">点击任意阶段查看细节</div>
+
+    <div class="stage-detail" id="stage-detail"></div>
+
+    <div class="demo-bar">
+      <button class="btn" id="demo-btn"><i data-lucide="play"></i>播放 INC-001 调查演示</button>
+      <span class="demo-note">模拟 SSE 推送效果：上方流水线会同步高亮当前阶段</span>
+    </div>
+    <div class="terminal" id="terminal"></div>
+  </div>
+</section>
+
+<section>
+  <div class="inner">
+    <h2><span class="num">03</span>技术栈地图：每层用了什么、为什么</h2>
+    <p class="sec-desc">鼠标悬停任意技术项，可以看到它在项目里的具体用途和选型原因。</p>
+
+    <div class="layer ly-frontend">
+      <div class="layer-name"><span class="l-ic"><i data-lucide="monitor"></i></span><span class="l-t">前端层</span><span class="l-e">Frontend</span></div>
+      <div class="layer-items">
+        <span class="titem">原生 HTML/CSS/JS<span class="tip">零依赖、零构建，打开即用；顺便手写了一个迷你 Markdown 渲染器来展示复盘报告</span></span>
+        <span class="titem">EventSource (SSE)<span class="tip">浏览器原生支持流式接收，每收到一个事件就追加一张 Thought / Action / Observation 卡片</span></span>
+        <span class="titem">并发事故卡片<span class="tip">多个事故同时调查，各自独立卡片 + 进度条 + 最小化，互不干扰</span></span>
+        <span class="titem">no-store 缓存策略<span class="tip">页面和静态资源禁用浏览器缓存，功能更新立即可见</span></span>
+      </div>
+    </div>
+
+    <div class="layer ly-api">
+      <div class="layer-name"><span class="l-ic"><i data-lucide="server"></i></span><span class="l-t">API 层</span><span class="l-e">FastAPI</span></div>
+      <div class="layer-items">
+        <span class="titem">FastAPI + Uvicorn<span class="tip">异步高性能框架；SSE 端点用 StreamingResponse 持续推送流水线事件</span></span>
+        <span class="titem">Bearer Token 认证<span class="tip">登录签发 Token，中间件统一校验，登出即吊销</span></span>
+        <span class="titem">PBKDF2 加盐哈希<span class="tip">用户密码不落明文，找回密码用自定义安全问题</span></span>
+        <span class="titem">CORS<span class="tip">前后端分离开发时允许跨域调用</span></span>
+      </div>
+    </div>
+
+    <div class="layer ly-agent">
+      <div class="layer-name"><span class="l-ic"><i data-lucide="brain"></i></span><span class="l-t">智能体层</span><span class="l-e">3 Paradigms</span></div>
+      <div class="layer-items">
+        <span class="titem">TriageAgent · Plan-and-Solve<span class="tip">先规划后执行：LLM 把告警转成 4~6 步调查计划，每步绑定一个工具和查询词</span></span>
+        <span class="titem">InvestigationAgent · ReAct<span class="tip">Reason + Act 循环：Thought 推理 → Action 调工具 → Observation 看结果 → 修正假设，直到 Finish</span></span>
+        <span class="titem">PostmortemAgent · Reflection<span class="tip">草稿 → 按 5 条质量标准自评审打分 → 低于 8 分自动修订后再评</span></span>
+        <span class="titem">emit 事件回调<span class="tip">三个 Agent 都接受统一的 emit 回调，把每个动作实时上报给流水线，再推给前端</span></span>
+      </div>
+    </div>
+
+    <div class="layer ly-tool">
+      <div class="layer-name"><span class="l-ic"><i data-lucide="wrench"></i></span><span class="l-t">工具层</span><span class="l-e">Tools</span></div>
+      <div class="layer-items">
+        <span class="titem">log_search<span class="tip">按关键词或正则检索事故日志；正则非法时自动降级为普通子串匹配，不会崩</span></span>
+        <span class="titem">metric_query<span class="tip">按时序指标名模糊匹配，返回随时间变化的数值序列，用于验证假设趋势</span></span>
+        <span class="titem">runbook_lookup<span class="tip">按服务名加载 YAML Runbook，按错误模式匹配处置步骤；找不到精确匹配就返回全部步骤兜底</span></span>
+      </div>
+    </div>
+
+    <div class="layer ly-llm">
+      <div class="layer-name"><span class="l-ic"><i data-lucide="sparkles"></i></span><span class="l-t">LLM 层</span><span class="l-e">Client</span></div>
+      <div class="layer-items">
+        <span class="titem">OpenAI 兼容客户端<span class="tip">统一封装 chat.completions 调用，一套代码可切换 DeepSeek / AIHubmix / Qwen / OpenAI</span></span>
+        <span class="titem">流式输出<span class="tip">stream=True 逐 token 接收，控制台实时可见，也便于后续接前端</span></span>
+        <span class="titem">temperature=0<span class="tip">排障场景要确定性输出，温度归零减少随机性，方便格式解析</span></span>
+        <span class="titem">.env 配置<span class="tip">模型、密钥、地址全走环境变量，换供应商不改代码</span></span>
+      </div>
+    </div>
+
+    <div class="layer ly-data">
+      <div class="layer-name"><span class="l-ic"><i data-lucide="database"></i></span><span class="l-t">数据层</span><span class="l-e">Storage</span></div>
+      <div class="layer-items">
+        <span class="titem">MySQL (PyMySQL)<span class="tip">存用户、Token、历史报告；启动时自动建库建表；支持报告搜索与批量清理</span></span>
+        <span class="titem">事故 JSON<span class="tip">每个故障样例一个文件：告警元数据 + 日志条目 + 时序指标 + 标准根因</span></span>
+        <span class="titem">Runbook YAML<span class="tip">按服务组织的标准处置手册，错误模式 → 严重级别 → 有序修复步骤</span></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="inner">
+    <h2><span class="num">04</span>三个故障样例：证据链怎么收敛的</h2>
+    <p class="sec-desc">这是项目内置的三个真实典型故障。点击切换，看日志证据 + 指标证据如何一步步指向根因。</p>
+    <div class="case-tabs" id="case-tabs"></div>
+    <div class="panel"><div class="panel-body" id="case-body"></div></div>
+  </div>
+</section>
+
+<section>
+  <div class="inner">
+    <h2><span class="num">05</span>开发中遇到的问题 & 怎么解决的</h2>
+    <p class="sec-desc">点击展开每一条，看问题、方案和对应源码。</p>
+    <div id="problems"></div>
+  </div>
+</section>
+
+<footer>
+  <div class="inner">
+    SRE On-Call Agent · 把排障方法论工程化 ·
+    <a href="https://github.com/kano321/SREOnCallAgent" target="_blank">查看源码</a>
+  </div>
+</footer>
+
+<script>
+const STAGES = {
+  0: {
+    title: "告警输入", en: "Incident JSON", color: "var(--rose)",
+    what: "一次事故的全部原始素材，以 JSON 文件存放在 data/incidents/ 下。字段包括 incident_id、service、severity、alert（指标名、当前值、阈值）、logs（带时间戳的日志条目）、metrics（时序指标）、affected_users。",
+    flow: ["输入：无", "输出：结构化 incident 字典"],
+    tech: ["JSON", "Pathlib 文件加载"],
+    files: ["data/incidents/db_pool_exhaustion.json", "src/agents/pipeline.py"]
+  },
+  1: {
+    title: "分诊 TriageAgent", en: "Plan-and-Solve", color: "var(--sky)",
+    what: "把原始告警交给 LLM，生成 4~6 步有序调查计划。每一步绑定一个工具（log_search / metric_query / runbook_lookup）、一个具体查询词、以及用中文写明的调查理由。这就是 Plan-and-Solve：先规划，后执行，避免模型漫无目的地乱查。",
+    flow: ["输入：告警 JSON 摘要", "输出：[{tool, query, reason}, ...] 有序计划"],
+    tech: ["结构化 Prompt 约定输出格式", "ast.literal_eval 解析 Python 字面量", "解析失败时回退内置 fallback 计划"],
+    files: ["src/agents/triage_agent.py"]
+  },
+  2: {
+    title: "调查 InvestigationAgent", en: "ReAct", color: "var(--teal)",
+    what: "执行阶段 1 的计划，最多循环 12 步。每一步：Thought（基于已有证据推理下一步查什么）→ Action（tool_name[query] 格式调用一个工具）→ Observation（工具返回结果写回历史）。证据累积进 findings，重复调用会被去重，模型判断证据够了就输出 Finish[根因结论] 结束。",
+    loop: true,
+    flow: ["输入：调查计划 + 事故上下文", "输出：{evidence[], root_cause, runbook_steps[]}"],
+    tech: ["正则解析 Thought / Action", "called_actions 集合去重", "max_steps=12 防死循环", "3 个工具：日志 / 指标 / Runbook"],
+    files: ["src/agents/investigation_agent.py", "src/tools/"]
+  },
+  3: {
+    title: "复盘 PostmortemAgent", en: "Reflection", color: "var(--violet)",
+    what: "把事故数据 + 调查发现交给 LLM，起草一份 7 节标准结构的中文 RCA 报告（摘要 / 时间线 / 5-Whys 根因分析 / 影响评估 / 立即处置 / 行动项表格 / 经验教训）。然后自评审：按根因明确性、时间线完整性等 5 条标准打 1~10 分，低于 8 分自动修订后再评。",
+    flow: ["输入：incident + findings", "输出：Markdown 格式 RCA 报告"],
+    tech: ["草稿 → 评审 → 修订 三段闭环", "评审输出 JSON：score + issues + suggestions", "评分阈值 8 分，最多修订 1 轮"],
+    files: ["src/agents/postmortem_agent.py"]
+  },
+  4: {
+    title: "报告输出", en: "RCA Report", color: "var(--green)",
+    what: "最终报告通过 FastAPI 写入 MySQL（sre_agent.reports 表），前端监控台可以随时浏览历史、按关键词搜索、单条删除或一键清空。整个调查过程同时通过 SSE 推送到浏览器，每个 Thought / Action / Observation 实时可见。",
+    flow: ["输入：最终报告", "输出：MySQL 持久化 + 前端实时流"],
+    tech: ["FastAPI REST + SSE", "MySQL 持久化", "历史搜索 / 管理"],
+    files: ["src/api/main.py", "src/api/db.py"]
+  }
+};
+
+const stageDetail = document.getElementById("stage-detail");
+function renderStage(id) {
+  const s = STAGES[id];
+  document.querySelectorAll(".pnode").forEach(n => n.classList.toggle("active", n.dataset.stage == id));
+  stageDetail.innerHTML = `
+    <div class="sd-head">
+      <h3>${s.title}</h3>
+      <span class="paradigm" style="color:${s.color};background:color-mix(in srgb, ${s.color} 12%, transparent)">${s.en}</span>
+    </div>
+    <p style="font-size:14.5px;color:var(--text-dim)">${s.what}</p>
+    ${s.loop ? `
+    <div style="margin-top:16px">
+      <h4 style="font-size:13px;color:var(--text-faint);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">ReAct 循环（最多 12 步）</h4>
+      <div class="react-loop">
+        <span class="rl-chip th">Thought 推理</span><span class="rl-arrow"><i data-lucide="chevron-right"></i></span>
+        <span class="rl-chip ac">Action 调用工具</span><span class="rl-arrow"><i data-lucide="chevron-right"></i></span>
+        <span class="rl-chip ob">Observation 观察结果</span><span class="rl-arrow"><i data-lucide="rotate-cw"></i></span>
+        <span style="font-size:13px;color:var(--text-faint)">循环直至证据收敛</span><span class="rl-arrow"><i data-lucide="chevron-right"></i></span>
+        <span class="rl-chip" style="background:rgba(134,239,172,.12);color:var(--green)">Finish 根因结论</span>
+      </div>
+    </div>` : ""}
+    <div class="sd-body">
+      <div class="sd-col"><h4>输入 / 输出</h4>${s.flow.map(f=>`<p>${f}</p>`).join("")}</div>
+      <div class="sd-col"><h4>关键技术</h4><div class="chips">${s.tech.map(t=>`<span class="chip">${t}</span>`).join("")}</div></div>
+    </div>
+    <div class="sd-files">${s.files.map(f=>`<a href="${f}">${f}</a>`).join("")}</div>
+  `;
+  if (window.lucide) lucide.createIcons();
+}
+document.querySelectorAll(".pnode").forEach(n => n.addEventListener("click", () => renderStage(n.dataset.stage)));
+renderStage(2);
+
+const demoEvents = [
+  {stage:0, cls:"ev-alert",  prefix:"ALERT",      text:"P1 告警: checkout-service P99 延迟 8.3s (阈值 1.0s), 影响 2847 用户"},
+  {stage:1, cls:"ev-stage",  prefix:"STAGE 1",    text:"TRIAGE 启动: 读取告警 JSON, 生成调查计划"},
+  {stage:1, cls:"ev-plan",   prefix:"PLAN",       text:"4 步计划: log_search[ERROR] 查错误日志 / metric_query[db_pool] 查连接池 / runbook_lookup[pool exhausted] 查处置手册"},
+  {stage:2, cls:"ev-thought",prefix:"Thought",    text:"P99 超标 8 倍, 先扫 ERROR 级日志找故障模式"},
+  {stage:2, cls:"ev-action", prefix:"Action",     text:"log_search[ERROR]"},
+  {stage:2, cls:"ev-obs",    prefix:"Observation",text:" 命中 6 条: \"DB connection pool exhausted (timeout=30s)\" / \"SELECT * FROM orders ... full table scan, duration=30s\" / \"too many connections\""},
+  {stage:2, cls:"ev-thought",prefix:"Thought",    text:"连接池耗尽可能, 用指标验证趋势"},
+  {stage:2, cls:"ev-action", prefix:"Action",     text:"metric_query[db_pool]"},
+  {stage:2, cls:"ev-obs",    prefix:"Observation",text:" db_pool_active_connections: 3, 8, 10, 10 | db_query_duration_p99: 45ms, 280ms, 12s, 30s"},
+  {stage:2, cls:"ev-thought",prefix:"Thought",    text:"查询从 45ms 恶化到 30s, 疑似全表扫描占住连接, 查 runbook 确认处置步骤"},
+  {stage:2, cls:"ev-action", prefix:"Action",     text:"runbook_lookup[pool exhausted]"},
+  {stage:2, cls:"ev-obs",    prefix:"Observation",text:" Runbook checkout-service: \"DB connection pool exhausted\" 处置步骤 6 条"},
+  {stage:2, cls:"ev-finish", prefix:"Finish",     text:"orders.user_id 缺索引导致全表扫描, 高负载下每次扫描占用连接 30s+, 耗尽 10 连接的连接池"},
+  {stage:3, cls:"ev-stage",  prefix:"STAGE 3",    text:"POST-MORTEM 启动: 起草 RCA 报告草稿"},
+  {stage:3, cls:"ev-stage",  prefix:"CRITIQUE",   text:"评审打分 8/10: 根因明确、时间线完整, 达标无需修订"},
+  {stage:4, cls:"ev-report", prefix:"REPORT",     text:"RCA 报告已生成并写入 MySQL: 摘要 / 时间线 / 5-Whys / 影响评估 / 立即处置 / 行动项 / 经验教训"}
+];
+const demoBtn = document.getElementById("demo-btn");
+const terminal = document.getElementById("terminal");
+let demoTimers = [];
+demoBtn.addEventListener("click", () => {
+  demoTimers.forEach(clearTimeout); demoTimers = [];
+  terminal.classList.add("on");
+  terminal.innerHTML = "";
+  demoBtn.disabled = true;
+  demoEvents.forEach((ev, i) => {
+    demoTimers.push(setTimeout(() => {
+      document.querySelectorAll(".pnode").forEach(n => {
+        n.classList.toggle("active-demo", n.dataset.stage == ev.stage);
+        n.classList.toggle("active", n.dataset.stage == ev.stage);
+      });
+      const line = document.createElement("div");
+      line.className = "tline " + ev.cls;
+      line.innerHTML = `<span class="prefix">${ev.prefix}</span>&nbsp;&nbsp;${ev.text}`;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+      if (i === demoEvents.length - 1) {
+        demoBtn.disabled = false;
+        demoBtn.innerHTML = '<i data-lucide="rotate-cw"></i>重播';
+        if (window.lucide) lucide.createIcons();
+      }
+    }, i * 950));
+  });
+});
+
+const CASES = [
+  {
+    id: "INC-001", service: "checkout-service", sev: "P1", sevCls: "sev-p1",
+    alert: "http_request_duration_p99 = 8.3s，阈值 1.0s，影响 2847 名用户",
+    logs: [
+      { t: "14:01:45", m: "DB connection pool exhausted — waiting for available connection (timeout=30s)" },
+      { t: "14:02:00", m: "Query timeout: SELECT * FROM orders WHERE user_id=12345 (full table scan, duration=30s)" },
+      { t: "14:02:30", m: "SQLSTATE[HY000]: General error: too many connections" }
+    ],
+    metrics: [
+      { name: "db_pool_active_connections", series: "3 → 8 → 10 → 10（打满）" },
+      { name: "db_query_duration_p99", series: "45ms → 280ms → 12s → 30s（恶化 660 倍）" },
+      { name: "request_queue_depth", series: "12 → 85 → 220 → 450（请求堆积）" }
+    ],
+    runbook: "Runbook checkout-service: \"DB connection pool exhausted\" 提供 6 步标准处置（紧急扩池 → 定位慢查询 → 加索引 → 回滚验证等）",
+    cause: "orders 表 user_id 字段缺索引。高负载下每次查询触发全表扫描，单个查询占用连接 30 秒以上，10 个连接的池子被迅速耗尽，后续请求全部排队超时。"
+  },
+  {
+    id: "INC-002", service: "auth-service", sev: "P1", sevCls: "sev-p1",
+    alert: "pod_memory_usage_percent = 96.8%，阈值 85%，濒临 OOM",
+    logs: [
+      { t: "08:00:00", m: "Session cache initialized, entries=0, ttl=not_configured" },
+      { t: "09:45:00", m: "GC pause 2100ms — full GC running every 2s, application threads stalled" },
+      { t: "09:47:20", m: "OOM imminent: heap=991MB/1024MB, session_cache_entries=52340, no eviction policy" }
+    ],
+    metrics: [
+      { name: "session_cache_entries", series: "0 → 15420 → 31200 → 52340（单调上涨，无回落）" },
+      { name: "pod_memory_usage_percent", series: "12.5% → 45% → 62% → 82% → 96.8%" },
+      { name: "gc_pause_ms", series: "5 → 8 → 45 → 120 → 890 → 2100" }
+    ],
+    runbook: "本例未查 Runbook：日志与指标证据已足够定位（缓存条目数与内存同步单调上涨，日志直接写出 no eviction policy）",
+    cause: "内存 Session Cache 没有配置 TTL 也没有淘汰策略。登录会话只进不出无限累积，堆内存被吃满，GC 压力飙升直到 OOM。"
+  },
+  {
+    id: "INC-003", service: "payment-service", sev: "P2", sevCls: "sev-p2",
+    alert: "payment_success_rate = 23.4%，阈值 95%，521 笔支付失败",
+    logs: [
+      { t: "16:18:00", m: "Stripe API 429 Too Many Requests: retry_after=60s" },
+      { t: "16:18:01", m: "Retry 1/3 for order_id=99001 (no backoff configured — immediate retry)" },
+      { t: "16:20:00", m: "Stripe API rate limit cascade: 347 failed payments in 2 minutes, amplified by retry storm" }
+    ],
+    metrics: [
+      { name: "stripe_api_calls_per_min", series: "45 → 280 → 890 → 1240 → 1380（放大 30 倍）" },
+      { name: "stripe_api_error_rate", series: "0% → 3.2% → 62.4% → 88.1% → 94.6%" },
+      { name: "payment_success_rate", series: "99.1% → 88.3% → 45.2% → 27.8% → 23.4%" }
+    ],
+    runbook: "Runbook payment-service: \"retry storm\" 标记为 P1 处置：立即关闭重试 → 等限流窗口重置 → 加指数退避 + jitter 后才允许重新开启",
+    cause: "促销活动带来 30 倍支付流量，触发 Stripe 429 限流。重试逻辑没有指数退避，每次 429 立即重试 3 次，形成重试风暴，进一步放大限流违约，成功率雪崩。"
+  }
+];
+
+const caseTabs = document.getElementById("case-tabs");
+const caseBody = document.getElementById("case-body");
+function renderCase(i) {
+  const c = CASES[i];
+  caseTabs.querySelectorAll(".ctab").forEach((t, j) => t.classList.toggle("on", j === i));
+  caseBody.innerHTML = `
+    <div class="ev-chain">
+      <div class="ev-item k-alert">
+        <div class="ev-dot"></div>
+        <div class="ev-label"><span class="kind-tag">${c.id} · ${c.service} · ${c.sev}</span>告警</div>
+        <div class="ev-text">${c.alert}</div>
+      </div>
+      <div class="ev-item k-log">
+        <div class="ev-dot"></div>
+        <div class="ev-label"><span class="kind-tag">log_search</span>日志证据</div>
+        ${c.logs.map(l => `<span class="code"><span class="hl">[${l.t}]</span> ${l.m}</span>`).join("")}
+      </div>
+      <div class="ev-item k-metric">
+        <div class="ev-dot"></div>
+        <div class="ev-label"><span class="kind-tag">metric_query</span>指标证据</div>
+        ${c.metrics.map(m => `<span class="code"><span class="hlm">${m.name}</span>: ${m.series}</span>`).join("")}
+      </div>
+      <div class="ev-item k-runbook">
+        <div class="ev-dot"></div>
+        <div class="ev-label"><span class="kind-tag">runbook_lookup</span>处置手册</div>
+        <div class="ev-text">${c.runbook}</div>
+      </div>
+      <div class="ev-item k-cause">
+        <div class="ev-dot"></div>
+        <div class="ev-label"><span class="kind-tag">Finish</span>根因结论</div>
+        <div class="ev-text" style="color:var(--text)">${c.cause}</div>
+      </div>
+    </div>`;
+}
+CASES.forEach((c, i) => {
+  const b = document.createElement("button");
+  b.className = "ctab";
+  b.innerHTML = `${c.id} <span class="sev ${c.sevCls}">${c.sev}</span> ${c.service}`;
+  b.addEventListener("click", () => renderCase(i));
+  caseTabs.appendChild(b);
+});
+renderCase(0);
+
+const PROBLEMS = [
+  {
+    ic: "shuffle", pi: "pi-1",
+    q: "LLM 输出格式不稳定，调查计划经常解析失败",
+    a: "<b>三层防御：</b>① Prompt 里严格约定输出格式（只准输出一个 Python 列表）；② 用 ast.literal_eval 解析并逐项校验类型；③ 解析失败时不报错，切换到内置 fallback 计划（默认查 ERROR / CRITICAL 日志 + 错误率指标 + Runbook），流水线永不中断。",
+    src: "src/agents/triage_agent.py — _parse_plan() / _fallback_plan()"
+  },
+  {
+    ic: "repeat", pi: "pi-2",
+    q: "Agent 在循环里反复调用同一个工具，浪费轮次",
+    a: "<b>调用去重 + 反向提示：</b>用 called_actions 集合记录每次 tool[query]，命中重复时不再执行，而是往对话历史里写回一条 Observation 提示「你已经查过了，请用 Finish 给出结论」，把模型往收敛方向推。",
+    src: "src/agents/investigation_agent.py — called_actions 集合"
+  },
+  {
+    ic: "eye-off", pi: "pi-3",
+    q: "调查过程是黑盒，用户点击后只能干等几分钟",
+    a: "<b>emit 事件回调 + SSE 实时推送：</b>三个 Agent 都接受统一的 emit 回调，每个 stage / plan / step / root_cause / critique 事件实时上报；FastAPI 用流式响应推给浏览器 EventSource，前端每收到一条就追加一张卡片，调查全程可视。",
+    src: "src/agents/pipeline.py — emit / src/api/main.py — SSE 端点"
+  },
+  {
+    ic: "shield-alert", pi: "pi-4",
+    q: "日志检索遇到非法正则表达式直接崩溃",
+    a: "<b>正则降级：</b>re.compile 失败时捕获 re.error，自动 re.escape 后退化为普通子串匹配，保证工具任何输入都不抛异常。",
+    src: "src/tools/log_search_tool.py — run() 中的 try/except"
+  },
+  {
+    ic: "layers", pi: "pi-5",
+    q: "多个事故同时调查时状态互相污染",
+    a: "<b>实例隔离：</b>每个事故跑独立的流水线实例，各自的计划、历史、证据、findings 完全隔离；前端每个事故一张独立卡片，带自己的进度条和最小化按钮。",
+    src: "src/agents/pipeline.py — run_pipeline() 每次新建实例"
+  },
+  {
+    ic: "wifi-off", pi: "pi-6",
+    q: "LLM API 报错、超时或返回空，整个流水线崩掉",
+    a: "<b>优雅降级：</b>客户端统一捕获所有 API 异常，返回空字符串；上游检测到空响应就安全终止本轮调查而不是抛异常；复盘评分解析失败时默认给 7 分，保证修订逻辑可用。",
+    src: "src/core/llm_client.py — think() / postmortem_agent.py — _extract_score()"
+  },
+  {
+    ic: "gauge", pi: "pi-7",
+    q: "复盘报告质量参差不齐，有时停在表面现象",
+    a: "<b>Reflection 自我修正：</b>报告不是一次生成完事——先起草，再让 LLM 扮演评审委员会按 5 条硬标准（根因是否具体、时间线是否完整、行动项是否可执行、5-Whys 是否触达系统性根因、教训是否可落地）打分，低于 8 分带着评审意见自动修订。",
+    src: "src/agents/postmortem_agent.py — draft → critique → revise"
+  }
+];
+const probBox = document.getElementById("problems");
+PROBLEMS.forEach((p, i) => {
+  const d = document.createElement("div");
+  d.className = "prob" + (i === 0 ? " open" : "");
+  d.innerHTML = `
+    <button class="prob-head">
+      <span class="prob-ic ${p.pi}"><i data-lucide="${p.ic}"></i></span>
+      <span>问题 ${i + 1}：${p.q}</span>
+      <i data-lucide="chevron-down" class="chev"></i>
+    </button>
+    <div class="prob-body">
+      <div class="fix">${p.a}</div>
+      <div class="fix-src">${p.src}</div>
+    </div>`;
+  d.querySelector(".prob-head").addEventListener("click", () => d.classList.toggle("open"));
+  probBox.appendChild(d);
+});
+
+if (window.lucide) lucide.createIcons();
+</script>
+</body>
+</html>
