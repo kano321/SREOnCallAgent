@@ -6,231 +6,368 @@
 
 ## 📝 项目介绍
 
-凌晨 3 点生产告警响起，值班 SRE 必须顶着压力完成分诊、排查日志与指标、查阅 runbook、撰写复盘报告。本项目用三阶段智能体流水线自动化整个工作流：
+凌晨 3 点生产告警响起，值班 SRE 必须顶着压力完成分诊、排查日志与指标、查阅 Runbook、撰写复盘报告。本项目用三阶段智能体流水线自动化整个工作流：
 
-- **第一阶段 — TriageAgent（分诊，Plan-and-Solve）**：把原始告警 JSON 转化为有序的调查计划
-- **第二阶段 — InvestigationAgent（调查，ReAct）**：循环使用日志搜索、指标查询、runbook 查阅三个工具定位根因
-- **第三阶段 — PostmortemAgent（复盘，Reflection）**：起草结构化 RCA 报告，按质量标准自我评审并修订
+- **第一阶段：TriageAgent（分诊，Plan-and-Solve）**：把原始告警 JSON 转化为有序的调查计划。
+- **第二阶段：InvestigationAgent（调查，ReAct）**：循环使用日志搜索、指标查询、Runbook 查阅三个工具定位根因。
+- **第三阶段：PostmortemAgent（复盘，Reflection）**：起草结构化 RCA 报告，按质量标准自我评审并修订。
+
+## 🏗️ 系统架构
+
+```mermaid
+flowchart LR
+    浏览器[Web 监控台] -->|HTTP / SSE| API[FastAPI 服务]
+    Alertmanager -->|Webhook 告警| API
+    API --> 数据库[(MySQL)]
+    API -->|Plan / ReAct / Reflection| 大模型[OpenAI 兼容模型]
+    API -->|/metrics| Prometheus
+    模拟指标[模拟业务指标] --> Prometheus
+    Prometheus -->|触发告警| Alertmanager
+    Prometheus --> Grafana
+```
+
+详细组件边界、数据流和扩展限制见 [架构说明](docs/architecture.md)。
 
 ## ✨ 核心功能
 
-- [x] 三个故障样例：数据库连接池耗尽、内存泄漏 OOM、外部 API 限流级联
-- [x] ReAct 调查循环，内置 3 个工具：`log_search`（日志搜索）、`metric_query`（指标查询）、`runbook_lookup`（手册查阅）
-- [x] Reflection 复盘报告：草稿 → 评审 → 修订 循环
-- [x] FastAPI REST 后端，已开启 CORS
-- [x] 结构化 RCA 报告：时间线、5-Why 分析、影响评估、行动项
-- [x] **监控台前端**：浏览器实时界面，SSE 流式展示 Agent 每一步推理
-- [x] **SSE 实时流**：每个 Thought / Action / Observation 实时推送到浏览器
-- [x] **MySQL 报告历史**：所有历史调查持久化存储，可随时浏览
-- [x] **用户账号系统**：注册 / 登录 / 登出，Bearer Token 认证（PBKDF2 加盐哈希）
-- [x] **密码找回**：通过用户自定义安全问题与答案
-- [x] **并发调查**：多个事故并行调查，各自独立卡片、进度条、可最小化控制台
-- [x] **重复打开去重**：再次打开已展开的历史报告时，直接滚动定位并高亮原卡片，不重复创建
-- [x] **历史报告搜索**：按事故关键词（incident_id / service / severity）模糊搜索
-- [x] **历史报告删除**：单条删除（悬停 🗑）与一键清空全部，均带二次确认
-- [x] **静态资源防缓存**：页面与静态文件禁用浏览器缓存（no-store），功能更新即时可见
+- [x] 三个故障样例：数据库连接池耗尽、内存泄漏 OOM、外部 API 限流级联。
+- [x] ReAct 调查循环，内置三个工具：`log_search`、`metric_query`、`runbook_lookup`。
+- [x] Reflection 复盘报告：草稿、评审、修订循环。
+- [x] FastAPI REST 后端和 Web 监控台。
+- [x] SSE 实时推送 Thought、Action、Observation 和报告生成进度。
+- [x] MySQL 持久化用户、Token、历史报告和完整调查结果。
+- [x] 注册、登录、登出、安全问题找回密码和 PBKDF2 加盐哈希。
+- [x] 多事故并发调查、进度条、卡片最小化和历史报告管理。
+- [x] Alertmanager Webhook 接入、告警指纹、重复抑制和后台调查。
+- [x] `/health`、`/ready` 和 `/metrics` 运维端点。
+- [x] Prometheus 应用指标、告警规则和预配置 Grafana 面板。
+- [x] 非 root Docker 镜像和完整 Docker Compose 部署。
+- [x] 三节点 Kind/Kubernetes 部署、探针、资源限制、PVC 和自愈演练。
+- [x] 单元测试、接口测试、安全分支测试和 GitHub Actions CI。
 
 ## 🛠️ 技术栈
 
-- **智能体范式**：Plan-and-Solve、ReAct、Reflection
-- **LLM**：任意 OpenAI 兼容 API（AIHubmix、ModelScope/Qwen、OpenAI、DeepSeek 等）
-- **后端**：FastAPI + Uvicorn
-- **存储**：JSON 故障剧本 + YAML runbook + **MySQL 5.7/8.x**（通过 PyMySQL 驱动）
-- **前端**：原生 HTML/CSS/JS（零依赖，含手写迷你 Markdown 渲染器）
+- **智能体范式**：Plan-and-Solve、ReAct、Reflection。
+- **大模型**：任意 OpenAI 兼容 API（AIHubmix、ModelScope/Qwen、OpenAI、DeepSeek 等）。
+- **后端**：FastAPI、Uvicorn、Prometheus Client。
+- **存储**：JSON 故障剧本、YAML Runbook、MySQL 5.7/8.x。
+- **监控**：Prometheus、Alertmanager、Grafana。
+- **部署**：Docker、Docker Compose、Kustomize、Kind、Kubernetes。
+- **前端**：原生 HTML/CSS/JavaScript，使用 SSE 接收实时事件。
+- **测试与 CI**：pytest、pytest-cov、GitHub Actions。
 
 ## 🚀 快速开始
 
-### 环境要求
+### 方式一：Docker Compose 一键启动（推荐）
 
-- Python 3.10+
-- 本地运行中的 MySQL 5.7+（应用启动时自动创建 `sre_agent` 数据库和全部数据表）
+环境要求：
 
-### 安装依赖
+- Docker Desktop
+- Docker Compose
+- 一个可用的 OpenAI 兼容模型 API Key
 
-```bash
-pip install -r requirements.txt
-```
-
-### 配置 API 密钥
-
-```bash
-cp .env.example .env
-# 编辑 .env，设置 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL_ID
-```
-
-免费 LLM 选项：
-- **DeepSeek**：`https://api.deepseek.com` — 国内直连，性价比高
-- **AIHubmix**：`https://aihubmix.com/v1` — 免费额度，OpenAI 兼容
-- **ModelScope/Qwen**：`https://api-inference.modelscope.cn/v1` — 每天 2000 次免费调用
-
-### 配置 MySQL（可选）
-
-连接参数通过环境变量配置，本地默认值如下：
-
-```bash
-MYSQL_HOST      # 默认 127.0.0.1
-MYSQL_PORT      # 默认 3306
-MYSQL_USER      # 默认 root
-MYSQL_PASSWORD  # 默认空
-MYSQL_DB        # 默认 sre_agent
-```
-
-Windows 上可在启动服务前临时设置（PowerShell）：
+首次启动先创建本地配置：
 
 ```powershell
-$env:MYSQL_PASSWORD = "你的密码"
+Copy-Item .env.example .env
+```
+
+编辑 `.env`，至少配置：
+
+```dotenv
+LLM_API_KEY=你的密钥
+LLM_BASE_URL=https://api.example.com/v1
+LLM_MODEL_ID=你的模型名称
+WEBHOOK_TOKEN=change-this-token
+```
+
+启动完整环境：
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+即使 LLM Key 暂时无效，应用也可以启动并保持健康；只有真正执行事故调查时才会调用模型。
+
+### 方式二：本地运行
+
+环境要求：
+
+- Python 3.10+
+- MySQL 5.7/8.x
+- 已经创建名为 `sre_agent` 的数据库
+
+安装依赖并配置环境：
+
+```powershell
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+MySQL 连接参数如下：
+
+```text
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=sre_agent
+```
+
+启动服务：
+
+```powershell
+uvicorn src.api.main:app --reload --port 8000
 ```
 
 ### 在 Jupyter Notebook 中运行
 
 ```bash
 jupyter lab
-# 打开 main.ipynb 依次运行全部单元格
 ```
 
-### 启动 FastAPI 服务
+打开 `main.ipynb` 并依次运行全部单元格。
 
-```bash
-uvicorn src.api.main:app --reload --port 8000
+## 🌐 本地访问地址
+
+| 服务 | 地址 | 用途 |
+|---|---|---|
+| 应用监控台 | http://localhost:8000 | 登录、事故调查和历史报告 |
+| OpenAPI 文档 | http://localhost:8000/docs | 交互式接口文档 |
+| Prometheus | http://localhost:9090 | 指标查询和告警规则 |
+| Alertmanager | http://localhost:9093 | 告警路由和状态 |
+| Grafana | http://localhost:3000 | SRE 监控面板 |
+| 模拟指标服务 | http://localhost:8001/metrics | 三个模拟业务的指标 |
+
+Grafana 开发环境默认账号密码为 `admin` / `admin`，可通过 `GRAFANA_ADMIN_USER` 和 `GRAFANA_ADMIN_PASSWORD` 修改。
+
+## 📊 健康检查与监控
+
+```powershell
+Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/ready
+Invoke-WebRequest http://localhost:8000/metrics
 ```
 
-然后浏览器打开 **http://localhost:8000**：
+- `/health` 判断进程是否存活。
+- `/ready` 检查 MySQL 是否可用。
+- `/metrics` 暴露 HTTP 请求、告警处理和事故调查指标。
 
-- **登录页**（`/login.html`）：注册账号（需设置安全问题，用于找回密码）、登录、通过安全问题重置密码
-- 登录后进入监控台：
-  - 选择事故 → 点击 **开始调查** → 实时观看三阶段流水线运行
-    （每个 `Thought` / `Action` / `Observation` 通过 Server-Sent Events 实时推送）。
-    多个调查可**并发**运行——每个都有自己的卡片、**进度条**和**最小化**按钮。
-  - 生成的复盘报告在 **复盘报告** 区域以 Markdown 渲染。
-  - 每次完成的调查都会保存到 MySQL（`sre_agent.reports`）并出现在 **历史报告**
-    列表中——点击即可重新打开；已打开的条目会滚动定位并高亮，不会重复创建。
-  - **历史报告管理**：支持按事故关键词**搜索**（输入自动搜索或点「搜索」按钮）、
-    单条**删除**（悬停 🗑）与一键**清空全部**（操作均需二次确认，删除不可恢复）。
+Grafana 面板地址：
 
-API 端点一览：
+```text
+http://localhost:3000/d/sre-oncall-agent
+```
+
+## 🖥️ 页面使用说明
+
+1. 打开 `/login.html`，注册账号并设置安全问题。
+2. 登录后选择故障样例，点击“开始调查”。
+3. 页面通过 SSE 实时展示分诊、工具调用、证据收集和复盘过程。
+4. 调查完成后，报告自动写入 MySQL 并显示在历史报告中。
+5. 支持按事故关键词搜索、单条删除和一键清空历史报告。
+
+多个事故可以并发调查，每个事故拥有独立卡片、进度条和最小化按钮。
+
+## 🔌 API 端点
 
 | 方法 | 端点 | 说明 |
 |---|---|---|
-| `GET` | `/` | 监控台前端页面 |
-| `GET` | `/login.html` | 登录 / 注册 / 找回密码页面 |
-| `POST` | `/auth/register` | 注册账号（用户名、密码、安全问题、答案） |
-| `POST` | `/auth/login` | 登录 → 返回 Bearer Token |
-| `POST` | `/auth/logout` | 注销（吊销 Token） |
-| `GET` | `/auth/me` | 校验 Token，返回用户名 |
-| `POST` | `/auth/forgot/question` | 找回密码第一步：获取安全问题 |
-| `POST` | `/auth/forgot/reset` | 找回密码第二步：验证答案并设置新密码 |
-| `GET` | `/health` | 健康检查 |
-| `GET` | `/incidents/fixtures` | 列出可用事故样例（需认证） |
-| `POST` | `/incidents/investigate` | 同步运行完整三阶段流水线（需认证） |
-| `GET` | `/incidents/investigate/stream?incident_id=...&token=...` | SSE 流式运行流水线（需认证） |
-| `GET` | `/incidents/{id}/report` | 获取本次会话生成的报告（需认证） |
-| `GET` | `/incidents/reports` | 历史报告列表，支持 `?keyword=` 搜索（需认证） |
-| `GET` | `/incidents/reports/{rid}` | 按运行 id 获取历史报告（需认证） |
-| `DELETE` | `/incidents/reports/{rid}` | 按运行 id 删除单条历史报告（需认证） |
-| `DELETE` | `/incidents/reports` | 清空全部历史报告（需认证，不可恢复） |
+| `GET` | `/` | 监控台页面 |
+| `GET` | `/login.html` | 登录、注册和找回密码页面 |
+| `POST` | `/auth/register` | 注册账号 |
+| `POST` | `/auth/login` | 登录并返回 Bearer Token |
+| `POST` | `/auth/logout` | 注销并吊销 Token |
+| `GET` | `/auth/me` | 校验 Token |
+| `POST` | `/auth/forgot/question` | 获取安全问题 |
+| `POST` | `/auth/forgot/reset` | 验证答案并重置密码 |
+| `GET` | `/health` | 进程存活检查 |
+| `GET` | `/ready` | MySQL 就绪检查 |
+| `GET` | `/metrics` | Prometheus 指标 |
+| `POST` | `/webhook/alert` | Alertmanager Webhook |
+| `GET` | `/webhook/events` | 告警调查事件 SSE |
+| `GET` | `/incidents/fixtures` | 可用事故样例 |
+| `POST` | `/incidents/investigate` | 同步执行完整调查 |
+| `GET` | `/incidents/investigate/stream` | SSE 流式执行调查 |
+| `GET` | `/incidents/{id}/report` | 获取当前进程中的报告 |
+| `GET` | `/incidents/reports` | 历史报告列表和关键词搜索 |
+| `GET` | `/incidents/reports/{rid}` | 获取单条历史报告 |
+| `DELETE` | `/incidents/reports/{rid}` | 删除单条历史报告 |
+| `DELETE` | `/incidents/reports` | 清空全部历史报告 |
+
+除健康检查、就绪检查、指标和 Webhook 外，事故接口需要 Bearer Token。EventSource 无法设置自定义请求头，因此 SSE 接口也支持通过查询参数传递 Token。
 
 ## 📖 使用示例
 
-### 通过 Python（notebook 或脚本）
+### 通过 Python 运行
 
 ```python
 from src.agents.pipeline import run_pipeline
 
 result = run_pipeline("db_pool_exhaustion")
-print(result["report"])    # Markdown 格式的 RCA 报告
-print(result["findings"])  # 根因 + 证据字典
+print(result["report"])
+print(result["findings"])
 ```
 
-### 通过 API
+### 通过 API 运行
+
+先登录获取 Token，然后调用事故接口：
 
 ```bash
-# 列出可用事故
-curl http://localhost:8000/incidents/fixtures
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"your-user","password":"your-password"}'
 
-# 运行流水线
+curl http://localhost:8000/incidents/fixtures \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
 curl -X POST http://localhost:8000/incidents/investigate \
   -H "Content-Type: application/json" \
-  -d '{"incident_id": "db_pool_exhaustion"}'
-
-# 获取生成的报告
-curl http://localhost:8000/incidents/db_pool_exhaustion/report
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"incident_id":"db_pool_exhaustion"}'
 ```
 
 ### 输出示例
 
-```
-🚨 阶段 1：分诊 — 生成调查计划
-   1. [log_search] pool exhausted — 查找数据库连接池耗尽相关日志
-   2. [metric_query] db_pool — 检查连接池饱和度随时间变化
-   3. [metric_query] latency — 量化请求延迟恶化程度
-   4. [runbook_lookup] DB pool exhausted — 获取修复步骤
+```text
+阶段 1：分诊，生成调查计划
+  1. log_search[pool exhausted]
+  2. metric_query[db_pool]
+  3. metric_query[latency]
+  4. runbook_lookup[DB pool exhausted]
 
-🔍 阶段 2：调查 — ReAct 工具循环
-   步骤 1 — log_search[pool exhausted] → 找到 3 条匹配日志
-   步骤 2 — metric_query[db_pool] → 连接池 14:01 起 10/10 满负荷
-   步骤 3 — runbook_lookup[DB pool exhausted] → 已获取修复步骤
-   ✅ 根因：orders.user_id 缺少索引导致全表扫描……
+阶段 2：调查，执行 ReAct 工具循环
+  找到连接池耗尽日志和 10/10 满载指标
+  查阅数据库连接池修复 Runbook
+  根因：orders.user_id 缺少索引导致全表扫描
 
-📝 阶段 3：复盘 — Reflection（草稿 → 评审 → 修订）
-   质量评分：9/10 — 无需修订。
-   ✅ 最终复盘报告完成。
+阶段 3：复盘，执行 Reflection
+  草稿、质量评审、最终修订
+  生成结构化 RCA 报告
 ```
+
+## 🧰 工程化增强
+
+本次工程化完善补充了以下能力：
+
+### 容器与启动可靠性
+
+- 主应用使用非 root 用户运行。
+- MySQL 启动阶段支持有界重试，避免数据库尚未就绪时应用崩溃。
+- `/health` 与 `/ready` 分离，适合容器和 Kubernetes 探针。
+- Compose 自动启动应用、MySQL、Prometheus、Alertmanager、Grafana 和模拟指标服务。
+
+### 可观测性
+
+- 应用暴露 `sre_http_requests_total`、请求延迟、5xx、告警处理和事故调查指标。
+- Prometheus 同时抓取应用和模拟业务指标。
+- 新增应用不可用、5xx 比例、P95 延迟和调查失败告警。
+- Grafana 自动加载包含 7 个面板的 SRE 监控台。
+
+### 测试与 CI
+
+- 当前包含 38 个 pytest 测试。
+- 测试覆盖认证、告警去重、接口鉴权、路径安全、数据库重试、工具层和 Agent 流水线。
+- Python 3.12 环境测试覆盖率约 71%。
+- GitHub Actions 检查测试、Compose、Kubernetes 清单和镜像构建。
+
+### Kubernetes
+
+- 使用 Kustomize 管理命名空间、配置、Secret 模板和应用资源。
+- MySQL 使用 StatefulSet、Headless Service 和 PVC。
+- 应用包含启动、就绪和存活探针，以及 CPU/内存请求和限制。
+- 应用使用非 root、只读根文件系统和最小权限配置。
+- 已验证三节点 Kind 集群、跨节点调度、Pod 自愈和滚动重启。
+
+当前告警去重、SSE 订阅和会话报告仍保存在进程内存中，因此 Kubernetes 基线固定为单副本。扩展为多副本前，需要将共享状态迁移到 Redis。
 
 ## 🎯 项目亮点
 
-- **一个系统串联三种智能体范式**：多数项目只使用单一范式；本项目将 Plan-and-Solve → ReAct → Reflection 串联为完整流水线
-- **领域新颖性**：SRE/运维领域实践项目
-- **贴近生产的剧本**：日志条目、指标时序、runbook YAML 都贴近真实故障模式（连接池耗尽、内存泄漏、限流级联）
-- **预留升级路径**：FastAPI 后端已开 CORS；SSE 流式输出与前端界面均无需改动 Agent 核心代码
+- **一个系统串联三种智能体范式**：Plan-and-Solve → ReAct → Reflection。
+- **面向真实 SRE 工作流**：告警接入、计划制定、证据收集、根因分析和复盘闭环。
+- **不只展示 Agent**：同时覆盖认证、数据库、监控、测试、容器和 Kubernetes。
+- **贴近生产的故障剧本**：日志、指标时序和 Runbook 对应真实故障模式。
+- **工程边界清晰**：明确单副本、内存状态和模拟数据源等限制。
 
-## 📊 性能评估
+## 📈 性能评估
 
-在 3 个故障样例上测试（Llama-3.3-70b / Groq，兼容任意 OpenAI 兼容 API）：
+在三个故障样例上测试：
 
 | 事故 | 根因识别 | 流水线耗时 |
 |---|---|---|
-| 数据库连接池耗尽 | ✅ orders.user_id 缺少索引 | ~30s |
-| 内存泄漏 OOM | ✅ 会话缓存无 TTL/淘汰策略 | ~25s |
-| 外部 API 限流 | ✅ 无指数退避的无限重试风暴 | ~28s |
+| 数据库连接池耗尽 | orders.user_id 缺少索引 | 约 30 秒 |
+| 内存泄漏 OOM | 会话缓存无 TTL/淘汰策略 | 约 25 秒 |
+| 外部 API 限流 | 无指数退避的重试风暴 | 约 28 秒 |
 
-样例根因识别准确率：**3/3（100%）**
+样例根因识别准确率：3/3（100%）。
 
-## 🔮 未来计划
+## 🧪 测试命令
 
-- [x] SSE 实时流：将 Agent 推理过程实时推送到前端
-- [x] 前端监控台：事故选择器 + 实时追踪 + Markdown 查看器（原生 JS 已上线；框架升级可选）
-- [ ] 真实日志接入：对接 Loki / CloudWatch / Datadog
-- [ ] 向量记忆：对历史 RCA 报告做向量化，加速后续调查
-- [ ] 安全的 runbook 执行：让 Agent 执行低风险修复命令
-- [ ] Prometheus `/metrics` 端点 + Grafana 监控面板
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest --cov=src --cov-report=term-missing --cov-fail-under=65
+```
 
-## 📝 项目更新日志（中文注释）
+测试不需要真实 MySQL、真实 LLM 或外部网络，相关依赖全部使用 Mock。
 
-> 记录本项目各阶段的功能迭代，便于了解项目演进历史。
+## ☸️ Kubernetes 部署
 
+Kubernetes 资源位于 `deploy/k8s`。完整步骤见 [Kubernetes 部署说明](deploy/k8s/README.md)，其中包括：
+
+- 创建三节点 Kind 集群。
+- 构建并加载本地镜像。
+- 创建 MySQL 和应用 Secret。
+- 部署 StatefulSet、Deployment、Service 和 Ingress。
+- 执行 Pod 删除自愈、滚动重启和故障排查。
+
+## 📚 文档导航
+
+- [项目完整理解与操作手册](docs/project-handbook.md)
+- [架构说明](docs/architecture.md)
+- [运维 Runbook](docs/runbooks/sre-oncall-agent.md)
+- [故障演练](docs/fault-drills.md)
+- [面试演示指南](docs/interview-guide.md)
+- [Kubernetes 部署说明](deploy/k8s/README.md)
+
+## 🔮 后续计划
+
+- [x] SSE 实时流和前端监控台。
+- [x] Prometheus `/metrics`、应用告警和 Grafana 监控面板。
+- [x] Docker Compose 和一键启动。
+- [x] 三节点 Kubernetes 部署和故障演练。
+- [ ] 将告警去重、运行状态和 SSE 广播迁移到 Redis，支持多副本。
+- [ ] 接入 Loki 或真实业务日志，替换模拟日志数据。
+- [ ] 增加真实 Kubernetes 指标和 Pod 级调查工具。
+- [ ] 增加 Runbook 安全执行、审计日志和 API 限流。
+
+## 📝 项目更新日志
+
+- **2026-10 工程化增强**
+  - 增加主应用 Dockerfile、非 root 运行和健康检查。
+  - 增加 MySQL 启动重试、`/ready`、数据库索引和过期 Token 清理。
+  - 增加 Prometheus 应用指标、Alertmanager Webhook 和 Grafana 面板。
+  - 增加 pytest 测试、覆盖率门槛和 GitHub Actions。
+  - 增加三节点 Kind/Kubernetes 部署、探针、PVC、资源限制和安全上下文。
+  - 补充中文架构、运维 Runbook、故障演练和面试演示文档。
 - **2026-08 迭代二：历史报告管理与稳定性修复**
-  - 历史报告支持关键词搜索（输入防抖 + 搜索按钮）、单条删除、一键清空（二次确认）
-  - 静态资源禁用浏览器缓存（no-store），前端功能更新即时可见
-  - 修复 Agent 调试打印在 GBK 控制台触发 UnicodeEncodeError 导致调查中断的问题
-    （Agent 打印收归 verbose 控制 + stdout/stderr 强制 UTF-8 输出）
-  - 修复历史报告详情接口 DATE_FORMAT 单 `%` 导致的 500 错误
-  - SQLite 时代的历史报告已一次性迁移至 MySQL（原 `data/reports.db`）
-- **2026-08 迭代一：监控台与存储层升级（本仓库维护者）**
-  - 前端监控台上线：并发调查卡片、实时进度条、卡片最小化、重复打开自动跳转去重
-  - 用户认证系统：注册 / 登录 / 登出 / 安全问题找回密码，PBKDF2 加盐哈希
-  - 存储层从 SQLite 迁移到 MySQL：新增 `src/api/db.py` 统一封装，三张表启动自动建表
-  - 修复登录页按钮无响应：`showMsg` 查询元素缺少 `#` 前缀，改用 `getElementById`
-  - README 汉化，作者信息更新
-- **项目初始版本（上游模板）**
-  - 三阶段 Agent 流水线（Triage → Investigation → Postmortem）与三个故障样例
+  - 历史报告支持关键词搜索、单条删除和一键清空。
+  - 静态资源禁用浏览器缓存，前端更新即时可见。
+  - 修复 GBK 控制台编码和 MySQL 日期格式化问题。
+- **2026-08 迭代一：监控台与存储层升级**
+  - 增加并发调查卡片、实时进度和用户认证。
+  - 存储层从 SQLite 迁移到 MySQL。
+- **项目初始版本**
+  - 三阶段 Agent 流水线（Triage → Investigation → Postmortem）和三个故障样例。
 
 ## 🤝 贡献指南
 
-欢迎提交 Issue 与 PR！
+欢迎提交 Issue 与 PR。
 
 ## 📄 许可证
 
-Apache License 2.0
+Apache License 2.0。
 
 ## 👤 作者
 

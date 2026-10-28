@@ -19,22 +19,31 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
+import re
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Set
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from src.agents.pipeline import run_pipeline, list_incidents, load_incident
-from src.api.auth import router as auth_router, get_current_user
+from src.api.auth import (
+    cleanup_expired_tokens,
+    get_current_user,
+    router as auth_router,
+)
 from src.api import db
+from src.api import metrics
 from src.core.llm_client import HelloAgentsLLM
 
 # 兜底：无论控制台/重定向使用何种编码（如 Windows GBK），
@@ -45,11 +54,40 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialize dependencies and keep the loop for worker-thread SSE events."""
+    global _main_loop
+    await asyncio.to_thread(db.init_db_with_retry)
+    removed_tokens = await asyncio.to_thread(cleanup_expired_tokens)
+    if removed_tokens:
+        logger.info("Removed %s expired authentication tokens", removed_tokens)
+    if not WEBHOOK_TOKEN or (
+        APP_ENV == "production" and WEBHOOK_TOKEN == DEFAULT_WEBHOOK_TOKEN
+    ):
+        raise RuntimeError("WEBHOOK_TOKEN must be set to a non-default value")
+    if not re.fullmatch(r"[A-Za-z0-9._~-]+", WEBHOOK_TOKEN):
+        raise RuntimeError(
+            "WEBHOOK_TOKEN may contain only letters, numbers, dot, underscore, "
+            "tilde, and hyphen"
+        )
+    if WEBHOOK_TOKEN == DEFAULT_WEBHOOK_TOKEN:
+        logger.warning("Using the development WEBHOOK_TOKEN; do not use it in production")
+    _main_loop = asyncio.get_running_loop()
+    try:
+        yield
+    finally:
+        _main_loop = None
+
 
 app = FastAPI(
     title="SRE On-Call Agent",
     description="AI-powered incident triage and post-mortem generation",
     version="1.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -65,15 +103,43 @@ async def no_cache_static(request, call_next):
     """静态资源与页面响应禁用缓存，确保前端更新后浏览器立即拿到最新版本
     （避免用户看到旧页面，误以为功能没上线）。"""
     response = await call_next(request)
-    if request.url.path.startswith(("/static/", "/login.html", "/")):
+    path = request.url.path
+    if path in ("/", "/login.html") or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
 
+
+@app.middleware("http")
+async def prometheus_http_metrics(request: Request, call_next):
+    """Record HTTP traffic using the resolved route instead of raw URL values."""
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    metrics.HTTP_REQUESTS_IN_PROGRESS.inc()
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or "unmatched"
+        elapsed = time.perf_counter() - started
+        metrics.HTTP_REQUESTS.labels(
+            request.method,
+            path,
+            str(status_code),
+        ).inc()
+        metrics.HTTP_REQUEST_DURATION.labels(request.method, path).observe(elapsed)
+        metrics.HTTP_REQUESTS_IN_PROGRESS.dec()
+
+
 app.include_router(auth_router)
 
-# In-memory store for this session's reports (SQLite keeps the full history)
+# In-memory store for this process's reports (MySQL keeps the full history)
 _report_store: Dict[str, Any] = {}
 
 
@@ -94,7 +160,24 @@ def _save_report(result: Dict[str, Any]) -> None:
     )
 
 
-db.init_db()
+def _persist_report(
+    result: Dict[str, Any],
+    emit: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> bool:
+    """Persist a completed investigation without discarding it on DB failure."""
+    try:
+        _save_report(result)
+        return True
+    except Exception as exc:
+        logger.exception("Failed to persist report %s", result.get("incident_id"))
+        if emit:
+            emit(
+                {
+                    "type": "persistence_warning",
+                    "message": f"Report persistence failed: {exc}",
+                }
+            )
+        return False
 
 
 class InvestigateRequest(BaseModel):
@@ -119,6 +202,20 @@ def login_page():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready():
+    """Readiness check used by container and Kubernetes probes."""
+    if not db.is_ready():
+        raise HTTPException(status_code=503, detail="Database is not ready")
+    return {"status": "ready"}
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    """Expose application metrics for Prometheus scraping."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/llm/check")
@@ -167,14 +264,21 @@ def investigate(req: InvestigateRequest, user: str = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail=str(e))
 
     start = time.time()
+    metrics.INVESTIGATIONS_IN_PROGRESS.inc()
     try:
         result = run_pipeline(req.incident_id, verbose=False)
     except Exception as e:
+        metrics.INVESTIGATIONS.labels("manual", "error").inc()
+        metrics.INVESTIGATION_DURATION.labels("manual").observe(time.time() - start)
         raise HTTPException(status_code=500, detail=f"Pipeline error: {e}")
+    finally:
+        metrics.INVESTIGATIONS_IN_PROGRESS.dec()
 
     result["elapsed_seconds"] = round(time.time() - start, 1)
     _report_store[req.incident_id] = result
-    _save_report(result)
+    _persist_report(result)
+    metrics.INVESTIGATIONS.labels("manual", "success").inc()
+    metrics.INVESTIGATION_DURATION.labels("manual").observe(time.time() - start)
     return result
 
 
@@ -189,7 +293,9 @@ def _sse(event: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Alertmanager webhook ingestion
 # ---------------------------------------------------------------------------
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "sre-webhook-dev")
+DEFAULT_WEBHOOK_TOKEN = "sre-webhook-dev"
+APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", DEFAULT_WEBHOOK_TOKEN)
 WEBHOOK_DEDUP_SECONDS = int(os.getenv("WEBHOOK_DEDUP_SECONDS", "600"))
 
 _alert_subscribers: Set[asyncio.Queue] = set()
@@ -219,13 +325,6 @@ class AlertmanagerPayload(BaseModel):
     commonAnnotations: Dict[str, str] = Field(default_factory=dict)
     externalURL: str = ""
     alerts: List[AlertmanagerAlert] = Field(default_factory=list)
-
-
-@app.on_event("startup")
-async def _capture_main_loop() -> None:
-    """Keep the API event loop so worker threads can deliver SSE events."""
-    global _main_loop
-    _main_loop = asyncio.get_running_loop()
 
 
 def _broadcast(event: Dict[str, Any]) -> None:
@@ -300,6 +399,8 @@ def _alert_to_incident(
 def _run_alert_investigation(incident: Dict[str, Any], fingerprint: str) -> None:
     """Run a full AI investigation in a worker thread."""
     incident_id = incident["incident_id"]
+    started = time.time()
+    metrics.INVESTIGATIONS_IN_PROGRESS.inc()
 
     def emit(event: Dict[str, Any]) -> None:
         payload = dict(event)
@@ -314,10 +415,7 @@ def _run_alert_investigation(incident: Dict[str, Any], fingerprint: str) -> None
             incident=incident,
         )
         _report_store[incident_id] = result
-        try:
-            _save_report(result)
-        except Exception as exc:
-            emit({"type": "alert_warning", "message": f"Report persistence failed: {exc}"})
+        _persist_report(result, emit)
 
         emit(
             {
@@ -327,7 +425,9 @@ def _run_alert_investigation(incident: Dict[str, Any], fingerprint: str) -> None
                 "root_cause": result.get("findings", {}).get("root_cause", ""),
             }
         )
+        metrics.INVESTIGATIONS.labels("alertmanager", "success").inc()
     except Exception as exc:
+        metrics.INVESTIGATIONS.labels("alertmanager", "error").inc()
         emit(
             {
                 "type": "alert_error",
@@ -337,6 +437,10 @@ def _run_alert_investigation(incident: Dict[str, Any], fingerprint: str) -> None
             }
         )
     finally:
+        metrics.INVESTIGATIONS_IN_PROGRESS.dec()
+        metrics.INVESTIGATION_DURATION.labels("alertmanager").observe(
+            time.time() - started
+        )
         _alert_running.discard(fingerprint)
 
 
@@ -366,6 +470,7 @@ async def alert_webhook(payload: AlertmanagerPayload, request: Request):
 
     for alert in payload.alerts:
         if alert.status and alert.status != "firing":
+            metrics.ALERTS_RECEIVED.labels("ignored").inc()
             continue
 
         incident = _alert_to_incident(
@@ -377,6 +482,7 @@ async def alert_webhook(payload: AlertmanagerPayload, request: Request):
         dedup_key = f"{fingerprint}|{alert.startsAt or payload.groupKey}"
 
         if fingerprint in _alert_running or dedup_key in _alert_seen:
+            metrics.ALERTS_RECEIVED.labels("duplicate").inc()
             skipped.append(
                 {
                     "incident_id": incident["incident_id"],
@@ -387,6 +493,7 @@ async def alert_webhook(payload: AlertmanagerPayload, request: Request):
 
         _alert_seen[dedup_key] = now
         _alert_running.add(fingerprint)
+        metrics.ALERTS_RECEIVED.labels("accepted").inc()
         _broadcast(
             {
                 "type": "alert",
@@ -488,13 +595,21 @@ async def investigate_stream(
         loop.call_soon_threadsafe(queue.put_nowait, event)
 
     async def runner() -> None:
+        started = time.time()
+        metrics.INVESTIGATIONS_IN_PROGRESS.inc()
         try:
             result = await asyncio.to_thread(run_pipeline, incident_id, False, emit)
             _report_store[incident_id] = result
-            _save_report(result)
+            _persist_report(result, emit)
+            metrics.INVESTIGATIONS.labels("stream", "success").inc()
         except Exception as e:
+            metrics.INVESTIGATIONS.labels("stream", "error").inc()
             emit({"type": "error", "message": str(e)})
         finally:
+            metrics.INVESTIGATIONS_IN_PROGRESS.dec()
+            metrics.INVESTIGATION_DURATION.labels("stream").observe(
+                time.time() - started
+            )
             emit({"type": "done"})
 
     task = asyncio.create_task(runner())

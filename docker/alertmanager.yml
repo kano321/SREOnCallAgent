@@ -13,10 +13,10 @@ route:
 receivers:
   - name: sre-oncall-agent
     webhook_configs:
-      - url: "http://host.docker.internal:8000/webhook/alert"
+      - url: "http://app:8000/webhook/alert"
         send_resolved: false
         http_config:
           http_headers:
             X-Webhook-Token:
               secrets:
-                - "sre-webhook-dev"
+                - "__WEBHOOK_TOKEN__"

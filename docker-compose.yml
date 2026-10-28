@@ -1,6 +1,66 @@
 name: sre-oncall-monitoring
 
 services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-sre_root_dev}
+      MYSQL_DATABASE: ${MYSQL_DB:-sre_agent}
+      MYSQL_USER: ${MYSQL_USER:-sre}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-sre_dev_password}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sre-oncall-agent:local
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL_ID: ${LLM_MODEL_ID:-}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-60}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER:-sre}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-sre_dev_password}
+      MYSQL_DB: ${MYSQL_DB:-sre_agent}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-sre-webhook-dev}
+      WEBHOOK_DEDUP_SECONDS: ${WEBHOOK_DEDUP_SECONDS:-600}
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
   demo-exporter:
     image: python:3.12-alpine
     restart: unless-stopped
@@ -38,6 +98,8 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
     depends_on:
+      app:
+        condition: service_healthy
       demo-exporter:
         condition: service_healthy
     healthcheck:
@@ -56,14 +118,24 @@ services:
     restart: unless-stopped
     ports:
       - "9093:9093"
+    environment:
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-sre-webhook-dev}
     volumes:
-      - ./docker/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./docker/alertmanager.yml:/etc/alertmanager/alertmanager.yml.template:ro
+    entrypoint:
+      - /bin/sh
+      - -ec
     command:
-      - "--config.file=/etc/alertmanager/alertmanager.yml"
-      - "--storage.path=/alertmanager"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - |
+        sed "s|__WEBHOOK_TOKEN__|$${WEBHOOK_TOKEN}|g" \
+          /etc/alertmanager/alertmanager.yml.template \
+          > /tmp/alertmanager.yml
+        exec /bin/alertmanager \
+          --config.file=/tmp/alertmanager.yml \
+          --storage.path=/alertmanager
     depends_on:
+      app:
+        condition: service_healthy
       prometheus:
         condition: service_healthy
     healthcheck:
@@ -77,5 +149,26 @@ services:
       retries: 5
       start_period: 10s
 
+  grafana:
+    image: grafana/grafana:11.6.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
 volumes:
+  grafana-data:
+  mysql-data:
   prometheus-data:

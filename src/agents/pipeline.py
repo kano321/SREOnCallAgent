@@ -3,6 +3,7 @@ SRE pipeline orchestrator — wires TriageAgent → InvestigationAgent → Postm
 """
 import json
 import os
+import re
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 
@@ -14,17 +15,22 @@ from src.agents.postmortem_agent import PostmortemAgent
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 INCIDENTS_DIR = DATA_DIR / "incidents"
 RUNBOOKS_DIR = DATA_DIR / "runbooks"
+INCIDENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 EventCallback = Optional[Callable[[Dict[str, Any]], None]]
 
 
 def list_incidents():
-    return [p.stem for p in INCIDENTS_DIR.glob("*.json")]
+    return sorted(p.stem for p in INCIDENTS_DIR.glob("*.json"))
 
 
 def load_incident(incident_id: str) -> Dict[str, Any]:
-    path = INCIDENTS_DIR / f"{incident_id}.json"
-    if not path.exists():
+    if not INCIDENT_ID_PATTERN.fullmatch(incident_id):
+        raise FileNotFoundError(f"Invalid incident id: {incident_id!r}")
+
+    incidents_root = INCIDENTS_DIR.resolve()
+    path = (incidents_root / f"{incident_id}.json").resolve()
+    if incidents_root not in path.parents or not path.is_file():
         raise FileNotFoundError(
             f"Incident '{incident_id}' not found. "
             f"Available: {list_incidents()}"

@@ -24,11 +24,12 @@ TOKEN_TTL = 7 * 24 * 3600  # 7 days
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _init_db() -> None:
-    db.init_db()
-
-
-_init_db()
+def cleanup_expired_tokens() -> int:
+    """Delete tokens that can no longer authenticate a request."""
+    return db.execute(
+        "DELETE FROM tokens WHERE created_at < %s",
+        (int(time.time()) - TOKEN_TTL,),
+    )
 
 
 # ---------------------------------------------------------------------------

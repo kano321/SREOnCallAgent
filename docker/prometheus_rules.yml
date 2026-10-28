@@ -1,6 +1,69 @@
 groups:
   - name: sre-oncall-demo
     rules:
+      - alert: SreOnCallAgentDown
+        expr: up{job="sre-oncall-agent"} == 0
+        for: 30s
+        labels:
+          severity: P1
+          service: sre-oncall-agent
+        annotations:
+          summary: "SRE On-Call Agent is unavailable"
+          description: "Prometheus cannot scrape the application metrics endpoint."
+          value: "{{ $value }}"
+          threshold: "1"
+          unit: "up"
+
+      - alert: SreOnCallAgentHigh5xxRate
+        expr: |
+          (
+            sum(rate(sre_http_requests_total{job="sre-oncall-agent",status=~"5.."}[2m]))
+            /
+            clamp_min(sum(rate(sre_http_requests_total{job="sre-oncall-agent"}[2m])), 0.001)
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: P1
+          service: sre-oncall-agent
+        annotations:
+          summary: "SRE On-Call Agent 5xx rate is elevated"
+          description: "More than 5 percent of application requests are failing with 5xx responses."
+          value: "{{ $value }}"
+          threshold: "0.05"
+          unit: "ratio"
+
+      - alert: SreOnCallAgentHighLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(sre_http_request_duration_seconds_bucket{job="sre-oncall-agent"}[2m])
+            )
+          ) > 1
+        for: 1m
+        labels:
+          severity: P2
+          service: sre-oncall-agent
+        annotations:
+          summary: "SRE On-Call Agent P95 latency is high"
+          description: "The application P95 HTTP latency has exceeded one second."
+          value: "{{ $value }}"
+          threshold: "1"
+          unit: "seconds"
+
+      - alert: SreInvestigationFailures
+        expr: increase(sre_investigations_total{job="sre-oncall-agent",status="error"}[5m]) > 0
+        for: 30s
+        labels:
+          severity: P2
+          service: sre-oncall-agent
+        annotations:
+          summary: "Incident investigations are failing"
+          description: "At least one investigation failed during the last five minutes."
+          value: "{{ $value }}"
+          threshold: "0"
+          unit: "failures"
+
       - alert: DBConnectionPoolSaturation
         expr: db_pool_active_connections{service="checkout-service"} > 8
         for: 30s

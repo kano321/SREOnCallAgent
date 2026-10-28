@@ -11,10 +11,14 @@ Connection settings come from environment variables (with local defaults):
 
 Tables are created automatically at startup via init_db().
 """
+import logging
 import os
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import pymysql
+
+logger = logging.getLogger(__name__)
 
 MYSQL = {
     "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
@@ -23,6 +27,9 @@ MYSQL = {
     "password": os.getenv("MYSQL_PASSWORD", ""),
     "database": os.getenv("MYSQL_DB", "sre_agent"),
     "charset": "utf8mb4",
+    "connect_timeout": int(os.getenv("MYSQL_CONNECT_TIMEOUT", "5")),
+    "read_timeout": int(os.getenv("MYSQL_READ_TIMEOUT", "10")),
+    "write_timeout": int(os.getenv("MYSQL_WRITE_TIMEOUT", "10")),
 }
 
 
@@ -35,6 +42,9 @@ def conn() -> pymysql.Connection:
         password=MYSQL["password"],
         database=MYSQL["database"],
         charset=MYSQL["charset"],
+        connect_timeout=MYSQL["connect_timeout"],
+        read_timeout=MYSQL["read_timeout"],
+        write_timeout=MYSQL["write_timeout"],
         cursorclass=pymysql.cursors.DictCursor,
     )
 
@@ -57,8 +67,19 @@ def execute(sql: str, args: Tuple = ()) -> int:
     return affected
 
 
+def _ensure_index(table: str, index: str, columns: str) -> None:
+    """Add a missing index without failing on databases created before it existed."""
+    rows = query(
+        "SELECT 1 FROM information_schema.statistics "
+        "WHERE table_schema = %s AND table_name = %s AND index_name = %s LIMIT 1",
+        (MYSQL["database"], table, index),
+    )
+    if not rows:
+        execute(f"CREATE INDEX `{index}` ON `{table}` ({columns})")
+
+
 def init_db() -> None:
-    """Create all tables if they do not exist yet."""
+    """Create all tables and indexes if they do not exist yet."""
     execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -93,3 +114,51 @@ def init_db() -> None:
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """
     )
+    _ensure_index("tokens", "idx_tokens_username", "username")
+    _ensure_index("reports", "idx_reports_incident_id", "incident_id")
+    _ensure_index("reports", "idx_reports_service", "service")
+    _ensure_index("reports", "idx_reports_severity", "severity")
+    _ensure_index("reports", "idx_reports_created_at", "created_at")
+
+
+def init_db_with_retry(
+    max_attempts: Optional[int] = None,
+    retry_delay: Optional[float] = None,
+) -> None:
+    """Initialize the schema, tolerating a database that is still starting."""
+    attempts = max_attempts or int(os.getenv("DB_INIT_MAX_ATTEMPTS", "30"))
+    delay = (
+        retry_delay
+        if retry_delay is not None
+        else float(os.getenv("DB_INIT_RETRY_SECONDS", "2"))
+    )
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            init_db()
+            logger.info("Database schema is ready")
+            return
+        except pymysql.MySQLError as exc:
+            last_error = exc
+            logger.warning(
+                "Database is not ready (attempt %s/%s): %s",
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts:
+                time.sleep(delay)
+
+    raise RuntimeError(
+        f"Database initialization failed after {attempts} attempts"
+    ) from last_error
+
+
+def is_ready() -> bool:
+    """Return whether a simple database query can be completed."""
+    try:
+        query("SELECT 1 AS ready")
+        return True
+    except pymysql.MySQLError:
+        return False

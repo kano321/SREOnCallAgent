@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-oncall-config
+  labels:
+    app.kubernetes.io/name: sre-oncall-agent
+data:
+  APP_ENV: production
+  MYSQL_HOST: sre-mysql
+  MYSQL_PORT: "3306"
+  MYSQL_DB: sre_agent
+  LLM_TIMEOUT: "60"
+  WEBHOOK_DEDUP_SECONDS: "600"
+  DB_INIT_MAX_ATTEMPTS: "30"
+  DB_INIT_RETRY_SECONDS: "2"
