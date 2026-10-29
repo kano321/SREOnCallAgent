@@ -13,7 +13,12 @@ const state = {
   nextRunId: 1,                       // 本地运行计数器
   runs: new Map(),                    // runId -> { es, incidentId, card, pct }
   runningByIncident: new Map(),       // incidentId -> runId (防止同一事故重复调查)
+  reportOffset: 0,
+  reportTotal: 0,
+  reportKeyword: "",
 };
+
+const REPORT_PAGE_SIZE = 20;
 
 /* ---------------- 认证 ---------------- */
 
@@ -282,7 +287,7 @@ function handleEvent(runId, ev) {
       logLine(consoleEl, "done", "🏁 调查结束");
       setRunStatus(runId, "done", "✅ 已完成");
       finishRun(runId);
-      loadReports();
+      loadReports(state.reportKeyword, false);
       break;
   }
 }
@@ -296,7 +301,7 @@ function finishRun(runId) {
 
 /* ---------------- 调查流程 ---------------- */
 
-function runInvestigation() {
+async function runInvestigation() {
   if (!state.currentId) return;
 
   // 同一事故已在进行中的调查 → 提示并跳转到该卡片，不重复开
@@ -314,9 +319,18 @@ function runInvestigation() {
   const { runId, card } = createRunCard(state.currentId, "live-" + state.currentId);
   state.runningByIncident.set(state.currentId, runId);
 
+  try {
+    const session = await authFetch("/auth/session", { method: "POST" });
+    if (!session.ok) throw new Error("无法建立 SSE 会话");
+  } catch (err) {
+    logLine(card.querySelector(".run-console"), "error", `❌ ${esc(String(err))}`);
+    setRunStatus(runId, "error", "❌ 会话失败");
+    finishRun(runId);
+    return;
+  }
+
   const es = new EventSource(
-    `/incidents/investigate/stream?incident_id=${encodeURIComponent(state.currentId)}` +
-    `&token=${encodeURIComponent(token())}`
+    `/incidents/investigate/stream?incident_id=${encodeURIComponent(state.currentId)}`
   );
   state.runs.get(runId).es = es;
 
@@ -351,43 +365,67 @@ async function loadIncidents() {
   });
 }
 
-async function loadReports(keyword) {
-  const q = keyword ? `?keyword=${encodeURIComponent(keyword)}` : "";
-  const res = await authFetch("/incidents/reports" + q);
+async function loadReports(keyword = "", append = false) {
+  const normalizedKeyword = keyword.trim();
+  if (!append) {
+    state.reportOffset = 0;
+    state.reportKeyword = normalizedKeyword;
+  }
+  const params = new URLSearchParams({
+    limit: String(REPORT_PAGE_SIZE),
+    offset: String(state.reportOffset),
+  });
+  if (state.reportKeyword) params.set("keyword", state.reportKeyword);
+  const res = await authFetch("/incidents/reports?" + params.toString());
   if (!res.ok) return;
   const data = await res.json();
   const ul = $("#reportList");
-  ul.innerHTML = "";
+  if (!append) ul.innerHTML = "";
   if (data.reports.length === 0) {
-    const li = document.createElement("li");
-    li.className = "report-empty";
-    li.textContent = keyword ? "没有匹配的历史报告" : "暂无历史报告";
-    ul.appendChild(li);
+    if (!append) {
+      const li = document.createElement("li");
+      li.className = "report-empty";
+      li.textContent = state.reportKeyword ? "没有匹配的历史报告" : "暂无历史报告";
+      ul.appendChild(li);
+    }
+    $("#loadMoreReports").style.display = "none";
     return;
   }
   data.reports.forEach((r) => {
     const li = document.createElement("li");
     li.className = "report-item";
+    const ownerLabel = r.owner_username === "system"
+      ? '<span class="report-owner">系统</span> '
+      : "";
     li.innerHTML =
       `<span class="sev ${esc(r.severity)}">${esc(r.severity)}</span> ` +
-      `${esc(r.incident_id)} · ${esc(r.service)}` +
+      `${ownerLabel}${esc(r.incident_id)} · ${esc(r.service)}` +
       `<small>${esc(r.created_at)}</small>` +
-      `<button class="report-del" title="删除该报告">🗑</button>`;
+      (r.owner_username === "system"
+        ? ""
+        : `<button class="report-del" title="删除该报告">🗑</button>`);
     li.onclick = () => loadReport(r.id);
-    li.querySelector(".report-del").onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm(`确定删除报告「${r.incident_id} · ${r.created_at}」？删除后不可恢复。`)) {
-        return;
-      }
-      const del = await authFetch(`/incidents/reports/${r.id}`, { method: "DELETE" });
-      if (!del.ok) return;
-      // 若该报告正以卡片打开，一并关闭
-      const openRunId = findRunByRef("hist-" + r.id);
-      if (openRunId !== null) closeRun(openRunId);
-      loadReports($("#reportSearch").value.trim());
-    };
+    const deleteButton = li.querySelector(".report-del");
+    if (deleteButton) {
+      deleteButton.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`确定删除报告「${r.incident_id} · ${r.created_at}」？删除后不可恢复。`)) {
+          return;
+        }
+        const del = await authFetch(`/incidents/reports/${r.id}`, { method: "DELETE" });
+        if (!del.ok) return;
+        const openRunId = findRunByRef("hist-" + r.id);
+        if (openRunId !== null) closeRun(openRunId);
+        loadReports(state.reportKeyword, false);
+      };
+    }
     ul.appendChild(li);
   });
+  state.reportOffset += data.reports.length;
+  state.reportTotal = data.pagination.total;
+  const loadMore = $("#loadMoreReports");
+  loadMore.style.display = data.pagination.has_more ? "" : "none";
+  loadMore.textContent = `加载更多（${state.reportOffset}/${state.reportTotal}）`;
 }
 
 /* 搜索：输入防抖 300ms 后按关键词重新加载（也可点「搜索」按钮立即触发） */
@@ -395,17 +433,21 @@ let searchTimer = null;
 $("#reportSearch").oninput = () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    loadReports($("#reportSearch").value.trim());
+    loadReports($("#reportSearch").value.trim(), false);
   }, 300);
 };
 $("#searchBtn").onclick = () => {
   clearTimeout(searchTimer);
-  loadReports($("#reportSearch").value.trim());
+  loadReports($("#reportSearch").value.trim(), false);
 };
 
-/* 清空全部历史报告（永久删除，二次确认） */
+$("#loadMoreReports").onclick = () => {
+  loadReports(state.reportKeyword, true);
+};
+
+/* 清空当前用户的历史报告（永久删除，二次确认） */
 $("#clearReportsBtn").onclick = async () => {
-  if (!confirm("确定清空全部历史报告？此操作不可恢复！")) return;
+  if (!confirm("确定清空当前账号的历史报告？此操作不可恢复！")) return;
   const res = await authFetch("/incidents/reports", { method: "DELETE" });
   if (!res.ok) return;
   // 关闭所有已打开的历史报告卡片
@@ -413,7 +455,7 @@ $("#clearReportsBtn").onclick = async () => {
     const run = state.runs.get(runId);
     if (run && run.ref && run.ref.startsWith("hist-")) closeRun(runId);
   });
-  loadReports();
+  loadReports(state.reportKeyword, false);
 };
 
 async function loadReport(id) {
@@ -490,6 +532,6 @@ $("#runBtn").onclick = runInvestigation;
 $("#llmCheckBtn").onclick = checkLLM;
 
 loadIncidents();
-loadReports();
+loadReports(state.reportKeyword, false);
 pollHealth();
 setInterval(pollHealth, 15000);

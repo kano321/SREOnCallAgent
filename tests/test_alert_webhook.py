@@ -107,13 +107,14 @@ def test_alert_conversion_preserves_alertmanager_context():
 def test_persistence_failure_emits_warning(monkeypatch):
     events = []
 
-    def fail(_result):
+    def fail(_result, _owner):
         raise RuntimeError("database offline")
 
     monkeypatch.setattr(main, "_save_report", fail)
 
     saved = main._persist_report(
         {"incident_id": "incident-1"},
+        "test-user",
         emit=events.append,
     )
 

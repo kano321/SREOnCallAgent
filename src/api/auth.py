@@ -7,19 +7,27 @@ Security notes (production best practices applied here):
   (100k iterations) plus a per-user random salt (stdlib `hashlib`, no deps).
 - Security answers are hashed the same way, compared case-insensitively.
 - Sessions are random bearer tokens (32 bytes hex), stored server-side,
-  with a TTL. Tokens are revoked on logout or password reset.
+  as SHA-256 hashes with a TTL. Tokens are revoked on logout or password reset.
 """
 import hashlib
+import os
 import secrets
 import time
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from src.api import db
 
 TOKEN_TTL = 7 * 24 * 3600  # 7 days
+SESSION_COOKIE_NAME = "sre_session"
+SESSION_COOKIE_SECURE = os.getenv(
+    "SESSION_COOKIE_SECURE", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+ALLOW_LEGACY_QUERY_TOKEN = os.getenv(
+    "ALLOW_LEGACY_QUERY_TOKEN",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -47,13 +55,71 @@ def _verify_password(password: str, salt_hex: str, expected_hash: str) -> bool:
     )
 
 
+def hash_token(token: str) -> str:
+    """Return the stable digest stored in the tokens table."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=TOKEN_TTL,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        secure=SESSION_COOKIE_SECURE,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+
+
 def _extract_token(request: Request) -> str:
-    """Bearer token from the Authorization header, or ?token= query param
-    (the query param form exists for EventSource, which cannot set headers)."""
+    """Read a token from header, HttpOnly cookie, or legacy query parameter."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
-    return request.query_params.get("token", "")
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME, "")
+    if cookie_token:
+        return cookie_token
+    if ALLOW_LEGACY_QUERY_TOKEN:
+        return request.query_params.get("token", "")
+    return ""
+
+
+def _find_token_record(raw_token: str):
+    """Find a hashed token, migrating a legacy plaintext row if necessary."""
+    token_digest = hash_token(raw_token)
+    rows = db.query(
+        "SELECT username, created_at FROM tokens "
+        "WHERE token = %s AND is_hashed = 1",
+        (token_digest,),
+    )
+    if rows:
+        return rows[0], token_digest
+
+    legacy_rows = db.query(
+        "SELECT username, created_at FROM tokens "
+        "WHERE token = %s AND is_hashed = 0",
+        (raw_token,),
+    )
+    if not legacy_rows:
+        return None, token_digest
+
+    db.execute(
+        "UPDATE tokens SET token = %s, is_hashed = 1 "
+        "WHERE token = %s AND is_hashed = 0",
+        (token_digest, raw_token),
+    )
+    return legacy_rows[0], token_digest
 
 
 def get_current_user(request: Request) -> str:
@@ -61,14 +127,14 @@ def get_current_user(request: Request) -> str:
     token = _extract_token(request)
     if not token:
         raise HTTPException(status_code=401, detail="未登录")
-    rows = db.query(
-        "SELECT username, created_at FROM tokens WHERE token = %s", (token,)
-    )
-    if not rows:
+    row, stored_token = _find_token_record(token)
+    if not row:
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
-    row = rows[0]
     if int(time.time()) - row["created_at"] > TOKEN_TTL:
-        db.execute("DELETE FROM tokens WHERE token = %s", (token,))
+        db.execute(
+            "DELETE FROM tokens WHERE token = %s AND is_hashed = 1",
+            (stored_token,),
+        )
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
     return row["username"]
 
@@ -125,7 +191,7 @@ def register(req: RegisterRequest):
 
 
 @router.post("/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, response: Response):
     """Verify credentials and issue a bearer token."""
     rows = db.query(
         "SELECT * FROM users WHERE username = %s", (req.username.strip(),)
@@ -135,18 +201,26 @@ def login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = secrets.token_hex(32)
     db.execute(
-        "INSERT INTO tokens (token, username, created_at) VALUES (%s, %s, %s)",
-        (token, row["username"], int(time.time())),
+        "INSERT INTO tokens (token, username, created_at, is_hashed) "
+        "VALUES (%s, %s, %s, 1)",
+        (hash_token(token), row["username"], int(time.time())),
     )
+    _set_session_cookie(response, token)
     return {"token": token, "username": row["username"]}
 
 
 @router.post("/logout")
-def logout(request: Request):
+def logout(request: Request, response: Response):
     """Revoke the current token."""
     token = _extract_token(request)
     if token:
-        db.execute("DELETE FROM tokens WHERE token = %s", (token,))
+        db.execute(
+            "DELETE FROM tokens WHERE "
+            "(token = %s AND is_hashed = 1) OR "
+            "(token = %s AND is_hashed = 0)",
+            (hash_token(token), token),
+        )
+    _clear_session_cookie(response)
     return {"ok": True}
 
 
@@ -154,6 +228,20 @@ def logout(request: Request):
 def me(user: str = Depends(get_current_user)):
     """Return the authenticated username (used to validate a token)."""
     return {"username": user}
+
+
+@router.post("/session")
+def refresh_session(
+    request: Request,
+    response: Response,
+    user: str = Depends(get_current_user),
+):
+    """Refresh the HttpOnly session cookie from an existing Bearer token."""
+    token = _extract_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+    _set_session_cookie(response, token)
+    return {"ok": True, "username": user}
 
 
 @router.post("/forgot/question")

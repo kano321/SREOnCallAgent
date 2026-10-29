@@ -1,8 +1,12 @@
+from types import SimpleNamespace
+
+import pytest
+
 from src.agents import pipeline
 from src.agents.investigation_agent import InvestigationAgent
 from src.agents.postmortem_agent import PostmortemAgent
 from src.agents.triage_agent import TriageAgent
-from src.core.llm_client import classify_llm_error
+from src.core.llm_client import HelloAgentsLLM, LLMError, classify_llm_error
 
 
 class FakeLLM:
@@ -146,3 +150,92 @@ def test_classify_llm_error_handles_common_provider_failures():
     assert classify_llm_error(ProviderError(401))["category"] == "auth_error"
     assert classify_llm_error(ProviderError(429))["category"] == "rate_limit"
     assert classify_llm_error(ProviderError(503))["category"] == "server_error"
+
+
+class ProviderError(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"provider error {status_code}")
+        self.status_code = status_code
+
+
+class FakeCompletions:
+    def __init__(self, outcomes):
+        self.outcomes = iter(outcomes)
+        self.calls = 0
+
+    def create(self, **_kwargs):
+        self.calls += 1
+        outcome = next(self.outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return iter(
+            [
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content=outcome),
+                        )
+                    ]
+                )
+            ]
+        )
+
+
+class FakeClient:
+    def __init__(self, outcomes):
+        self.chat = SimpleNamespace(completions=FakeCompletions(outcomes))
+        self.timeouts = []
+
+    def with_options(self, timeout):
+        self.timeouts.append(timeout)
+        return self
+
+
+def _llm_with_outcomes(outcomes, monkeypatch):
+    llm = HelloAgentsLLM(
+        model="test-model",
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        timeout=5,
+        verbose=False,
+    )
+    llm.client = FakeClient(outcomes)
+    llm.max_retries = 2
+    llm.retry_base_delay = 0
+    monkeypatch.setattr("src.core.llm_client.time.sleep", lambda _seconds: None)
+    return llm
+
+
+def test_llm_retries_rate_limit_and_returns_content(monkeypatch):
+    llm = _llm_with_outcomes([ProviderError(429), "OK"], monkeypatch)
+
+    assert llm.think([{"role": "user", "content": "test"}]) == "OK"
+    assert llm.client.chat.completions.calls == 2
+
+
+def test_llm_does_not_retry_auth_error(monkeypatch):
+    llm = _llm_with_outcomes([ProviderError(401), "SHOULD NOT RUN"], monkeypatch)
+
+    with pytest.raises(LLMError) as exc:
+        llm.think([{"role": "user", "content": "test"}])
+
+    assert exc.value.category == "auth_error"
+    assert llm.client.chat.completions.calls == 1
+
+
+def test_llm_retries_empty_response(monkeypatch):
+    llm = _llm_with_outcomes(["", "OK"], monkeypatch)
+
+    assert llm.think([{"role": "user", "content": "test"}]) == "OK"
+    assert llm.client.chat.completions.calls == 2
+
+
+def test_llm_budget_exhaustion_is_explicit(monkeypatch):
+    llm = _llm_with_outcomes(["unused"], monkeypatch)
+    llm.request_budget = 0
+
+    with pytest.raises(LLMError) as exc:
+        llm.think([{"role": "user", "content": "test"}])
+
+    assert exc.value.category == "budget_exhausted"
+    assert llm.client.chat.completions.calls == 0

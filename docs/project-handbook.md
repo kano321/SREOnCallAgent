@@ -163,8 +163,9 @@ flowchart LR
 #### 浏览器手动调查
 
 ```text
-登录页 -> /auth/login -> localStorage 保存 Token
-监控台 -> /incidents/investigate/stream?incident_id=...&token=...
+登录页 -> /auth/login -> localStorage 保存 Token，同时设置 HttpOnly Cookie
+监控台 -> /auth/session -> 用 Bearer Token 刷新 Cookie
+监控台 -> /incidents/investigate/stream?incident_id=...
 FastAPI -> run_pipeline
 FastAPI -> SSE 推送 stage/plan/step/report/done
 浏览器 -> 更新卡片、进度条和 Markdown 报告
@@ -228,9 +229,10 @@ SREOnCallAgent/
 
 1. 调用 `db.init_db_with_retry()`，初始化表并等待 MySQL 就绪。
 2. 调用 `cleanup_expired_tokens()`，清理过期登录 Token。
-3. 检查生产环境是否仍使用默认或非法 Webhook Token。
-4. 保存事件循环对象，供后台线程向 SSE 队列投递事件。
-5. 应用关闭时将事件循环引用清空。
+3. 自动增加新字段，并把旧明文 Token 迁移为 SHA-256 哈希。
+4. 检查生产环境是否仍使用默认或非法 Webhook Token。
+5. 保存事件循环对象，供后台线程向 SSE 队列投递事件。
+6. 应用关闭时清空事件循环引用并关闭 MySQL 连接池。
 
 这一实现解决了“容器已启动但 MySQL 还没启动”的启动顺序问题。
 
@@ -249,7 +251,7 @@ SREOnCallAgent/
 
 | 变量 | 作用 | 多副本风险 |
 |---|---|---|
-| `_report_store` | 保存当前进程刚生成的完整报告 | 请求落到其他副本时可能读不到 |
+| `_report_store` | 以 `(用户名, 事故 ID)` 保存当前进程的报告 | 请求落到其他副本时可能读不到 |
 | `_alert_running` | 标记正在执行的告警指纹 | 不同副本可能重复调查 |
 | `_alert_seen` | 保存去重时间窗口内的告警键 | 不同副本无法共享 |
 | `_alert_subscribers` | 保存 `/webhook/events` 的 SSE 队列 | 事件不会跨副本广播 |
@@ -275,10 +277,10 @@ SREOnCallAgent/
 | `POST /incidents/investigate` | 同步执行完整 Agent 流水线 |
 | `GET /incidents/investigate/stream` | 在后台任务中执行流水线，通过 SSE 推送 |
 | `GET /incidents/{id}/report` | 从当前进程的 `_report_store` 读取 |
-| `GET /incidents/reports` | 从 MySQL 读取历史报告，可按关键词搜索 |
+| `GET /incidents/reports` | 分页读取当前用户和系统报告，可按关键词搜索 |
 | `GET /incidents/reports/{rid}` | 按数据库 ID 读取并解析完整 payload |
 | `DELETE /incidents/reports/{rid}` | 删除单条历史报告 |
-| `DELETE /incidents/reports` | 清空所有历史报告 |
+| `DELETE /incidents/reports` | 清空当前用户的历史报告 |
 
 #### 报告持久化
 
@@ -327,7 +329,9 @@ API 路由先注册，`/static` 最后挂载。这样可以避免静态资源路
 #### Token
 
 - 登录成功后生成 32 字节随机值，转换为 64 位十六进制字符串。
-- Token 明文保存在 `tokens` 表。
+- 数据库只保存 Token 的 SHA-256 哈希，不保存客户端持有的原始 Token。
+- 登录同时设置 HttpOnly、SameSite=Lax 的 `sre_session` Cookie。
+- 旧库中的明文 Token 会在启动时自动转为哈希。
 - 默认有效期为 7 天。
 - 退出登录删除当前 Token。
 - 重置密码会删除该用户全部 Token。
@@ -335,12 +339,13 @@ API 路由先注册，`/static` 最后挂载。这样可以避免静态资源路
 
 #### 认证依赖
 
-`get_current_user()` 从以下两个位置读取 Token：
+`get_current_user()` 从以下位置读取 Token：
 
 1. `Authorization: Bearer <token>`。
-2. 查询参数 `?token=...`。
+2. HttpOnly Cookie `sre_session`。
+3. 只有显式开启兼容时才读取旧查询参数 `?token=...`。
 
-支持查询参数是因为浏览器原生 `EventSource` 不能设置自定义请求头。代价是 Token 可能出现在代理访问日志中，生产环境应通过一次性订阅 Token、Cookie 或专用 EventSource 方案改进。
+浏览器原生 `EventSource` 不能设置自定义请求头，因此前端在建立 SSE 前调用 `/auth/session` 刷新 Cookie。查询参数鉴权默认关闭，避免长期 Token 进入代理访问日志。
 
 #### 用户接口
 
@@ -350,16 +355,17 @@ API 路由先注册，`/static` 最后挂载。这样可以避免静态资源路
 | `POST /auth/login` | 校验密码，生成 Token |
 | `POST /auth/logout` | 删除当前 Token |
 | `GET /auth/me` | 验证 Token 返回用户名 |
+| `POST /auth/session` | 用 Bearer Token 刷新 HttpOnly Cookie |
 | `POST /auth/forgot/question` | 返回安全问题 |
 | `POST /auth/forgot/reset` | 校验答案并重置密码 |
 
 ### 6.3 `src/api/db.py`
 
-负责 MySQL 连接、查询、写入、建表和索引。
+负责 MySQL 连接池、查询、写入、建表、索引和兼容迁移。
 
 #### 连接方式
 
-每次 `query()` 或 `execute()` 都会创建一条新连接，并在结束时关闭。这种实现简单，适合当前演示规模，但没有连接池。高并发生产环境应使用连接池。
+应用使用 DBUtils `PooledDB` 管理连接。`query()` 和 `execute()` 从连接池借用连接，执行结束后归还，避免每次查询都新建物理连接。连接池最小缓存、最大缓存和最大连接数均可配置。
 
 连接参数来自：
 
@@ -372,6 +378,9 @@ MYSQL_DB
 MYSQL_CONNECT_TIMEOUT
 MYSQL_READ_TIMEOUT
 MYSQL_WRITE_TIMEOUT
+MYSQL_POOL_MIN_CACHED
+MYSQL_POOL_MAX_CACHED
+MYSQL_POOL_MAX_CONNECTIONS
 ```
 
 #### 数据表
@@ -379,8 +388,8 @@ MYSQL_WRITE_TIMEOUT
 | 表 | 主要字段 | 用途 |
 |---|---|---|
 | `users` | `username`, `password_hash`, `salt`, `question`, `answer_hash` | 用户和安全问题 |
-| `tokens` | `token`, `username`, `created_at` | Bearer Token |
-| `reports` | `incident_id`, `service`, `severity`, `created_at`, `payload` | 历史事故报告 |
+| `tokens` | `token`, `username`, `created_at`, `is_hashed` | Token 哈希 |
+| `reports` | `incident_id`, `service`, `severity`, `owner_username`, `created_at`, `payload` | 按用户隔离的历史报告 |
 
 #### 索引
 
@@ -389,6 +398,7 @@ MYSQL_WRITE_TIMEOUT
 - 报告服务名。
 - 报告严重级别。
 - 报告创建时间。
+- 报告所有者。
 
 `_ensure_index()` 会先查询 `information_schema.statistics`，只对缺失索引执行创建，兼容旧数据库。
 
@@ -438,13 +448,22 @@ LLM_API_KEY
 LLM_BASE_URL
 LLM_MODEL_ID
 LLM_TIMEOUT
+LLM_MAX_RETRIES
+LLM_RETRY_BASE_SECONDS
+LLM_REQUEST_BUDGET_SECONDS
 ```
 
 三项必填，缺少时抛出 `ValueError`。
 
 #### `think()`
 
-接收 OpenAI 格式的 messages，使用流式请求收集模型输出。异常发生时会打印错误并返回空字符串，因此 InvestigationAgent 检测到空响应后会停止循环并返回已有证据。
+接收 OpenAI 格式的 messages，使用流式请求收集模型输出。实现包含：
+
+1. 对网络错误、429、5xx 和空响应进行有界重试。
+2. 使用指数退避和随机抖动，避免同时重试造成二次冲击。
+3. 认证错误、余额不足和模型不存在等错误不重试。
+4. 使用 `LLM_REQUEST_BUDGET_SECONDS` 控制一次调用的总时间上限。
+5. 所有重试仍失败时抛出 `LLMError`，由调查流向前端返回明确错误。
 
 #### `check()`
 
@@ -503,6 +522,7 @@ LLM_TIMEOUT
   "incident_id": "db_pool_exhaustion",
   "service": "checkout-service",
   "severity": "P1",
+  "owner_username": "demo-user",
   "plan": [],
   "findings": {},
   "report": "Markdown RCA"
@@ -737,7 +757,10 @@ state = {
   currentId,              // 当前选择的事故
   nextRunId,              // 本地卡片编号
   runs,                   // 正在显示的全部调查
-  runningByIncident       // 防止同一事故重复执行
+  runningByIncident,      // 防止同一事故重复执行
+  reportOffset,           // 当前分页偏移
+  reportTotal,            // 历史报告总数
+  reportKeyword           // 当前搜索词
 }
 ```
 
@@ -749,9 +772,9 @@ state = {
 | `checkAuth()` | 检查本地 Token |
 | `createRunCard()` | 创建调查卡片 |
 | `handleEvent()` | 按 SSE 事件类型更新进度和日志 |
-| `runInvestigation()` | 创建 EventSource 并订阅调查流 |
+| `runInvestigation()` | 刷新 Cookie 后创建 EventSource 并订阅调查流 |
 | `loadIncidents()` | 获取故障样例 |
-| `loadReports()` | 获取并渲染历史报告列表 |
+| `loadReports()` | 分页获取当前用户和系统报告，并支持加载更多 |
 | `loadReport()` | 打开历史报告，重复打开时聚焦已有卡片 |
 | `renderMarkdown()` | 项目内置的简化 Markdown 渲染器 |
 | `checkLLM()` | 调用 `/llm/check` |
@@ -848,7 +871,7 @@ curl -X POST http://localhost:8000/auth/login \
   -d '{"username":"demo-user","password":"demo-pass-123"}'
 ```
 
-登录响应中的 `token` 用于后续接口。
+登录响应中的 `token` 用于后续接口，同时浏览器会收到 HttpOnly `sre_session` Cookie。手动报告归属于当前用户；Alertmanager 自动报告归属于只读的 `system`，所有登录用户可以查看但不能删除。
 
 ### 13.2 查询样例和运行调查
 
@@ -856,13 +879,14 @@ curl -X POST http://localhost:8000/auth/login \
 curl http://localhost:8000/incidents/fixtures \
   -H "Authorization: Bearer YOUR_TOKEN"
 
-curl -N "http://localhost:8000/incidents/investigate/stream?incident_id=db_pool_exhaustion&token=YOUR_TOKEN"
+curl -N "http://localhost:8000/incidents/investigate/stream?incident_id=db_pool_exhaustion" \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
 ### 13.3 查询历史报告
 
 ```bash
-curl "http://localhost:8000/incidents/reports?keyword=checkout" \
+curl "http://localhost:8000/incidents/reports?keyword=checkout&limit=20&offset=0" \
   -H "Authorization: Bearer YOUR_TOKEN"
 
 curl http://localhost:8000/incidents/reports/1 \
@@ -1023,12 +1047,12 @@ kubectl -n sre-oncall rollout restart deployment/sre-oncall-agent
 
 | 文件 | 覆盖内容 |
 |---|---|
-| `tests/test_auth.py` | 哈希、注册、登录、过期 Token、Token 清理 |
-| `tests/test_db.py` | 数据库重试、重试耗尽、就绪检查 |
-| `tests/test_api.py` | 健康检查、就绪检查、鉴权、事故接口、指标 |
+| `tests/test_auth.py` | 密码哈希、Token 哈希迁移、Cookie、过期与清理 |
+| `tests/test_db.py` | 连接池、字典游标、数据库重试和就绪检查 |
+| `tests/test_api.py` | 鉴权、报告隔离、分页、事故接口和指标 |
 | `tests/test_alert_webhook.py` | Token、去重、Resolved 忽略、告警转换、持久化失败 |
 | `tests/test_pipeline_and_tools.py` | 路径安全、数据加载、流水线编排、三个工具 |
-| `tests/test_agents.py` | 三个 Agent 的解析、降级、证据收集和修订 |
+| `tests/test_agents.py` | Agent 解析、证据收集、修订和 LLM 重试 |
 
 运行测试：
 
@@ -1042,10 +1066,10 @@ kubectl -n sre-oncall rollout restart deployment/sre-oncall-agent
 .\.venv\Scripts\python.exe -m pytest `
   --cov=src `
   --cov-report=term-missing `
-  --cov-fail-under=65
+  --cov-fail-under=70
 ```
 
-当前结果约为 38 个测试、71% 覆盖率。
+当前结果约为 53 个测试、77% 覆盖率。
 
 ### 17.2 GitHub Actions
 
@@ -1217,28 +1241,25 @@ curl http://app:8000/metrics
 
 - 日志和指标是样例。
 - 尚未接入 Loki、CloudWatch、Datadog 或 Kubernetes 实时日志。
-- 历史报告对所有登录用户共享，没有按用户隔离。
 - 报告搜索使用 `LIKE %keyword%`，数据量大时需要全文索引或搜索引擎。
 
 ### 23.3 数据库限制
 
-- 每次请求新建连接，没有连接池。
 - MySQL 是单实例，不具备生产级高可用。
 - 没有数据库迁移工具，结构变更依赖启动时初始化。
 
 ### 23.4 安全限制
 
-- EventSource Token 通过查询参数传递，可能进入代理日志。
-- Token 以明文形式保存在数据库。
 - 没有登录限流、验证码、审计日志和权限角色。
 - 当前认证适合教学和内部演示，不适合直接面向公网。
+- `SESSION_COOKIE_SECURE` 默认关闭以兼容本地 HTTP；HTTPS 部署必须开启。
 
 ### 23.5 工程限制
 
 - 没有后台任务队列，长时间调查依赖线程和进程内事件。
 - 应用崩溃会丢失正在进行的调查。
-- 没有真正的 LLM 重试、熔断和预算控制。
-- 没有分页，历史报告快速增长时需要补充。
+- 没有 LLM 熔断器和按 Token 计费的成本预算。
+- SQLite 时代的历史报告保留在数据库中，但默认标记为 `legacy`，不会显示给普通用户。
 
 ## 二十四、后续演进方向
 
@@ -1247,9 +1268,9 @@ curl http://app:8000/metrics
 1. Redis 共享告警锁、运行状态和 SSE 广播。
 2. 独立工作队列和调查任务状态表。
 3. Loki 和真实 Kubernetes 指标接入。
-4. 用户角色、报告隔离和审计日志。
-5. 大模型超时、重试、熔断和成本统计。
-6. MySQL 连接池、迁移工具和高可用。
+4. 用户角色、审计日志和登录限流。
+5. 大模型熔断器和成本统计。
+6. Alembic 数据库迁移工具和 MySQL 高可用。
 7. HPA、PodDisruptionBudget 和 NetworkPolicy。
 
 ## 二十五、相关文档
@@ -1259,4 +1280,5 @@ curl http://app:8000/metrics
 - [运维 Runbook](runbooks/sre-oncall-agent.md)
 - [故障演练](fault-drills.md)
 - [面试演示指南](interview-guide.md)
+- [功能验证测试文档](feature-acceptance-test.md)
 - [Kubernetes 部署](../deploy/k8s/README.md)

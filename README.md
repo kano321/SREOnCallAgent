@@ -36,8 +36,12 @@ flowchart LR
 - [x] FastAPI REST 后端和 Web 监控台。
 - [x] SSE 实时推送 Thought、Action、Observation 和报告生成进度。
 - [x] MySQL 持久化用户、Token、历史报告和完整调查结果。
+- [x] MySQL 连接池、Token 哈希存储和旧库幂等迁移。
 - [x] 注册、登录、登出、安全问题找回密码和 PBKDF2 加盐哈希。
-- [x] 多事故并发调查、进度条、卡片最小化和历史报告管理。
+- [x] HttpOnly Cookie 鉴权 SSE，默认不再把长期 Token 放入 URL。
+- [x] 多事故并发调查、进度条、卡片最小化和用户隔离历史报告。
+- [x] 历史报告分页、按用户隔离，以及只读系统告警报告。
+- [x] LLM 分类重试、指数退避、总时间预算和错误透传。
 - [x] Alertmanager Webhook 接入、告警指纹、重复抑制和后台调查。
 - [x] `/health`、`/ready` 和 `/metrics` 运维端点。
 - [x] Prometheus 应用指标、告警规则和预配置 Grafana 面板。
@@ -50,7 +54,7 @@ flowchart LR
 - **智能体范式**：Plan-and-Solve、ReAct、Reflection。
 - **大模型**：任意 OpenAI 兼容 API（AIHubmix、ModelScope/Qwen、OpenAI、DeepSeek 等）。
 - **后端**：FastAPI、Uvicorn、Prometheus Client。
-- **存储**：JSON 故障剧本、YAML Runbook、MySQL 5.7/8.x。
+- **存储**：JSON 故障剧本、YAML Runbook、MySQL 5.7/8.x、DBUtils 连接池。
 - **监控**：Prometheus、Alertmanager、Grafana。
 - **部署**：Docker、Docker Compose、Kustomize、Kind、Kubernetes。
 - **前端**：原生 HTML/CSS/JavaScript，使用 SSE 接收实时事件。
@@ -166,7 +170,7 @@ http://localhost:3000/d/sre-oncall-agent
 2. 登录后选择故障样例，点击“开始调查”。
 3. 页面通过 SSE 实时展示分诊、工具调用、证据收集和复盘过程。
 4. 调查完成后，报告自动写入 MySQL 并显示在历史报告中。
-5. 支持按事故关键词搜索、单条删除和一键清空历史报告。
+5. 支持按事故关键词搜索、分页加载、单条删除和清空当前用户历史报告。
 
 多个事故可以并发调查，每个事故拥有独立卡片、进度条和最小化按钮。
 
@@ -180,6 +184,7 @@ http://localhost:3000/d/sre-oncall-agent
 | `POST` | `/auth/login` | 登录并返回 Bearer Token |
 | `POST` | `/auth/logout` | 注销并吊销 Token |
 | `GET` | `/auth/me` | 校验 Token |
+| `POST` | `/auth/session` | 用 Bearer Token 刷新 HttpOnly 会话 Cookie |
 | `POST` | `/auth/forgot/question` | 获取安全问题 |
 | `POST` | `/auth/forgot/reset` | 验证答案并重置密码 |
 | `GET` | `/health` | 进程存活检查 |
@@ -191,12 +196,12 @@ http://localhost:3000/d/sre-oncall-agent
 | `POST` | `/incidents/investigate` | 同步执行完整调查 |
 | `GET` | `/incidents/investigate/stream` | SSE 流式执行调查 |
 | `GET` | `/incidents/{id}/report` | 获取当前进程中的报告 |
-| `GET` | `/incidents/reports` | 历史报告列表和关键词搜索 |
+| `GET` | `/incidents/reports` | 历史报告分页、用户隔离和关键词搜索 |
 | `GET` | `/incidents/reports/{rid}` | 获取单条历史报告 |
 | `DELETE` | `/incidents/reports/{rid}` | 删除单条历史报告 |
-| `DELETE` | `/incidents/reports` | 清空全部历史报告 |
+| `DELETE` | `/incidents/reports` | 清空当前用户的历史报告 |
 
-除健康检查、就绪检查、指标和 Webhook 外，事故接口需要 Bearer Token。EventSource 无法设置自定义请求头，因此 SSE 接口也支持通过查询参数传递 Token。
+除健康检查、就绪检查、指标和 Webhook 外，事故接口需要 Bearer Token 或 HttpOnly 会话 Cookie。浏览器发起 SSE 前会调用 `/auth/session` 建立 Cookie，因此默认不再通过 URL 传递长期 Token。旧查询参数鉴权默认关闭，只可通过 `ALLOW_LEGACY_QUERY_TOKEN=true` 临时启用。
 
 ## 📖 使用示例
 
@@ -267,10 +272,18 @@ curl -X POST http://localhost:8000/incidents/investigate \
 
 ### 测试与 CI
 
-- 当前包含 38 个 pytest 测试。
-- 测试覆盖认证、告警去重、接口鉴权、路径安全、数据库重试、工具层和 Agent 流水线。
-- Python 3.12 环境测试覆盖率约 71%。
+- 当前包含 53 个 pytest 测试。
+- 测试覆盖 Token 哈希迁移、Cookie 鉴权、报告隔离和分页、连接池、告警去重、LLM 重试、路径安全、工具层和 Agent 流水线。
+- Python 3.12 环境测试覆盖率约 77%。
 - GitHub Actions 检查测试、Compose、Kubernetes 清单和镜像构建。
+
+### 可靠性与安全
+
+- MySQL 使用可配置连接池，不再为每次查询新建物理连接。
+- Token 数据库只保存 SHA-256 哈希，启动时自动迁移旧明文 Token。
+- 手动报告按用户隔离，自动告警报告标记为只读系统报告。
+- 历史报告支持 `limit`、`offset` 和加载更多。
+- LLM 对 429、5xx、网络错误和空响应执行有界重试，认证与模型配置错误立即失败。
 
 ### Kubernetes
 
@@ -307,7 +320,7 @@ curl -X POST http://localhost:8000/incidents/investigate \
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m pytest --cov=src --cov-report=term-missing --cov-fail-under=65
+.\.venv\Scripts\python.exe -m pytest --cov=src --cov-report=term-missing --cov-fail-under=70
 ```
 
 测试不需要真实 MySQL、真实 LLM 或外部网络，相关依赖全部使用 Mock。
@@ -325,6 +338,7 @@ Kubernetes 资源位于 `deploy/k8s`。完整步骤见 [Kubernetes 部署说明]
 ## 📚 文档导航
 
 - [项目完整理解与操作手册](docs/project-handbook.md)
+- [功能验证测试文档](docs/feature-acceptance-test.md)
 - [架构说明](docs/architecture.md)
 - [运维 Runbook](docs/runbooks/sre-oncall-agent.md)
 - [故障演练](docs/fault-drills.md)
@@ -351,8 +365,13 @@ Kubernetes 资源位于 `deploy/k8s`。完整步骤见 [Kubernetes 部署说明]
   - 增加 pytest 测试、覆盖率门槛和 GitHub Actions。
   - 增加三节点 Kind/Kubernetes 部署、探针、PVC、资源限制和安全上下文。
   - 补充中文架构、运维 Runbook、故障演练和面试演示文档。
+- **2026-10-29 可靠性与安全优化**
+  - 增加 MySQL 连接池、Token 哈希存储和旧库自动迁移。
+  - 增加报告所有者隔离、系统报告、分页和后端“加载更多”。
+  - 增加 HttpOnly Cookie SSE 鉴权，并默认关闭 URL Token。
+  - 增加 LLM 分类重试、指数退避、总时间预算和明确错误信息。
 - **2026-08 迭代二：历史报告管理与稳定性修复**
-  - 历史报告支持关键词搜索、单条删除和一键清空。
+  - 历史报告支持关键词搜索、单条删除和清空当前用户历史报告。
   - 静态资源禁用浏览器缓存，前端更新即时可见。
   - 修复 GBK 控制台编码和 MySQL 日期格式化问题。
 - **2026-08 迭代一：监控台与存储层升级**

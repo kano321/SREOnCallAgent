@@ -64,7 +64,7 @@ kubectl -n sre-oncall rollout status deployment/sre-oncall-agent
 
 服务端只需要单向推送事件，不需要双向通信。SSE 使用普通 HTTP，部署和运维更简单，FastAPI 可以直接返回 `StreamingResponse`。
 
-代价是 EventSource 不能设置自定义请求头，因此本项目额外支持通过查询参数传递 Bearer Token。
+EventSource 不能设置自定义请求头，因此前端会先用 Bearer Token 调用 `/auth/session`，建立 HttpOnly、SameSite=Lax Cookie。长期 Token 不再放入 URL，旧查询参数鉴权默认关闭。
 
 ### 为什么 Kubernetes 只部署一个副本？
 
@@ -82,7 +82,7 @@ kubectl -n sre-oncall rollout status deployment/sre-oncall-agent
 
 ### 测试如何避免真实调用大模型？
 
-测试会 Mock 大模型和 Agent 类，覆盖接口认证、告警转换、去重、数据库重试、工具调用和流水线编排。测试不需要真实 MySQL、LLM 或外网。
+测试会 Mock 大模型和 Agent 类，覆盖 Cookie 与 Token 哈希迁移、报告隔离和分页、告警转换、去重、连接池、LLM 重试、工具调用和流水线编排。测试不需要真实 MySQL、LLM 或外网。
 
 ### 如何把项目扩展到多副本？
 
@@ -107,6 +107,6 @@ kubectl -n sre-oncall rollout status deployment/sre-oncall-agent
 - 构建容器化 AI SRE 调查平台，实现三阶段 Agent 编排、SSE 实时推送和 MySQL 报告持久化。
 - 增加 Prometheus 业务指标、4 条应用告警和 7 面板 Grafana 监控台。
 - 使用 Kustomize 部署三节点 Kind 集群，配置探针、资源限制、MySQL PVC、非 root 和只读根文件系统。
-- 增加 38 个 pytest 测试，覆盖率约 71%，并通过 GitHub Actions 检查测试、Compose、Kubernetes 清单和镜像构建。
+- 增加 53 个 pytest 测试，覆盖率约 77%，并通过 GitHub Actions 检查测试、Compose、Kubernetes 清单和镜像构建。
 
 在 Redis 和 MySQL 高可用完成之前，不要写“支持生产级多副本”或“生产级高可用”。

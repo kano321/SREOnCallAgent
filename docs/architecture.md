@@ -13,7 +13,7 @@ flowchart TB
 
     subgraph 应用层
         API[FastAPI 服务]
-        认证[Bearer Token 认证]
+        认证[Bearer Token / HttpOnly Cookie]
         流水线[三阶段 Agent 流水线]
         SSE[SSE 事件分发]
         指标接口[/metrics 接口]
@@ -75,7 +75,7 @@ sequenceDiagram
 |---|---|---|
 | FastAPI | 认证、事故接口、Webhook、SSE 和指标接口 | 进程内存和 MySQL |
 | Agent 流水线 | 制定计划、调查、反思并生成 RCA | 单次请求作用域 |
-| MySQL | 用户、Token 和历史报告 | 持久化磁盘 |
+| MySQL | 用户、Token 哈希和按用户隔离的历史报告 | 持久化磁盘 |
 | Prometheus | 采集应用和模拟业务指标 | 持久化时序数据 |
 | Alertmanager | 将触发规则发送给应用 | 持久化通知状态 |
 | Grafana | 展示服务健康、延迟和调查指标 | 持久化面板配置 |
@@ -91,11 +91,17 @@ sequenceDiagram
 - 数据库启动慢时，应用不会在模块导入阶段直接崩溃。
 - Kubernetes 和 Docker 可以区分“进程活着”和“依赖已就绪”。
 
+数据库访问通过连接池复用连接，连接池大小、获取阻塞策略和健康检查由环境变量控制。
+
 ### Webhook 幂等处理
 
 每条告警使用 Alertmanager 指纹和 `startsAt` 组成去重键。正在调查的指纹和去重时间窗口内的重复告警会被跳过。
 
 当前去重状态保存在进程内，因此部署基线保持单副本。多副本场景需要将这部分状态迁移到 Redis 或数据库。
+
+### LLM 请求重试
+
+大模型客户端对网络错误、429、5xx 和空响应执行指数退避重试。认证错误、余额不足和模型配置错误不会重试。每次调查还受到总时间预算限制，避免长时间占用调查线程。
 
 ### 报告持久化失败
 
@@ -110,11 +116,14 @@ Kubernetes Ingress 已关闭代理缓冲并放宽超时时间。服务端使用�
 ## 安全边界
 
 - 密码和安全问题答案使用 PBKDF2-SHA256 加盐哈希。
-- Bearer Token 为随机值，服务端保存并设置七天有效期。
+- Bearer Token 为随机值，数据库只保存 SHA-256 哈希并设置七天有效期。
+- 浏览器登录时同时设置 HttpOnly、SameSite=Lax Cookie，SSE 默认通过 Cookie 鉴权。
+- 旧 Token 查询参数默认关闭，仅在显式配置 `ALLOW_LEGACY_QUERY_TOKEN=true` 时兼容。
 - Webhook 使用共享 Token 和常量时间比较。
 - `incident_id` 只允许安全字符，并校验最终路径位于故障样例目录内。
 - 应用容器使用 UID 999 运行，根文件系统只读。
 - Kubernetes Secret 不提交到仓库，只保留示例模板。
+- 手动调查报告按用户隔离，Alertmanager 自动报告使用只读的 `system` 所有者。
 
 ## 当前扩展限制
 

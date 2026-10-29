@@ -6,6 +6,8 @@ Run with: uvicorn src.api.main:app --reload --port 8000
 Endpoints:
   GET  /                                — monitoring dashboard (static frontend)
   GET  /health                          — liveness check
+  GET  /ready                           — MySQL readiness check
+  GET  /metrics                         — Prometheus metrics
   GET  /incidents/fixtures              — list available sample incident IDs
   POST /incidents/investigate           — run the full 3-agent pipeline (sync)
   GET  /incidents/investigate/stream    — run pipeline with SSE streaming (for frontend)
@@ -27,7 +29,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,12 +83,13 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         _main_loop = None
+        await asyncio.to_thread(db.close_pool)
 
 
 app = FastAPI(
     title="SRE On-Call Agent",
     description="AI-powered incident triage and post-mortem generation",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -139,21 +142,23 @@ async def prometheus_http_metrics(request: Request, call_next):
 
 app.include_router(auth_router)
 
-# In-memory store for this process's reports (MySQL keeps the full history)
-_report_store: Dict[str, Any] = {}
+# In-memory store for this process's reports (owner, incident_id) -> result
+_report_store: Dict[Tuple[str, str], Any] = {}
 
 
 # ---------------------------------------------------------------------------
 # MySQL persistence
 # ---------------------------------------------------------------------------
-def _save_report(result: Dict[str, Any]) -> None:
+def _save_report(result: Dict[str, Any], owner_username: str) -> None:
     db.execute(
-        "INSERT INTO reports (incident_id, service, severity, created_at, payload) "
-        "VALUES (%s, %s, %s, %s, %s)",
+        "INSERT INTO reports "
+        "(incident_id, service, severity, owner_username, created_at, payload) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
         (
             result["incident_id"],
             result.get("service", ""),
             result.get("severity", ""),
+            owner_username,
             time.strftime("%Y-%m-%d %H:%M:%S"),
             json.dumps(result, ensure_ascii=False),
         ),
@@ -162,11 +167,12 @@ def _save_report(result: Dict[str, Any]) -> None:
 
 def _persist_report(
     result: Dict[str, Any],
+    owner_username: str,
     emit: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> bool:
     """Persist a completed investigation without discarding it on DB failure."""
     try:
-        _save_report(result)
+        _save_report(result, owner_username)
         return True
     except Exception as exc:
         logger.exception("Failed to persist report %s", result.get("incident_id"))
@@ -275,8 +281,8 @@ def investigate(req: InvestigateRequest, user: str = Depends(get_current_user)):
         metrics.INVESTIGATIONS_IN_PROGRESS.dec()
 
     result["elapsed_seconds"] = round(time.time() - start, 1)
-    _report_store[req.incident_id] = result
-    _persist_report(result)
+    _report_store[(user, req.incident_id)] = result
+    _persist_report(result, user)
     metrics.INVESTIGATIONS.labels("manual", "success").inc()
     metrics.INVESTIGATION_DURATION.labels("manual").observe(time.time() - start)
     return result
@@ -414,8 +420,8 @@ def _run_alert_investigation(incident: Dict[str, Any], fingerprint: str) -> None
             emit=emit,
             incident=incident,
         )
-        _report_store[incident_id] = result
-        _persist_report(result, emit)
+        _report_store[("system", incident_id)] = result
+        _persist_report(result, "system", emit)
 
         emit(
             {
@@ -599,8 +605,8 @@ async def investigate_stream(
         metrics.INVESTIGATIONS_IN_PROGRESS.inc()
         try:
             result = await asyncio.to_thread(run_pipeline, incident_id, False, emit)
-            _report_store[incident_id] = result
-            _persist_report(result, emit)
+            _report_store[(user, incident_id)] = result
+            _persist_report(result, user, emit)
             metrics.INVESTIGATIONS.labels("stream", "success").inc()
         except Exception as e:
             metrics.INVESTIGATIONS.labels("stream", "error").inc()
@@ -646,46 +652,71 @@ async def investigate_stream(
 @app.get("/incidents/{incident_id}/report")
 def get_report(incident_id: str, user: str = Depends(get_current_user)):
     """Retrieve a report generated earlier in this session."""
-    if incident_id not in _report_store:
+    stored = _report_store.get((user, incident_id))
+    if stored is None:
+        stored = _report_store.get(("system", incident_id))
+    if stored is None:
         raise HTTPException(
             status_code=404,
             detail=f"No report found for '{incident_id}'. Call POST /incidents/investigate first.",
         )
     return {
         "incident_id": incident_id,
-        "report": _report_store[incident_id]["report"],
+        "report": stored["report"],
     }
 
 
 @app.get("/incidents/reports")
 def list_reports(
     keyword: str = Query("", max_length=64),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     user: str = Depends(get_current_user),
 ):
     """List historical reports (newest first); optional keyword filters
     incident_id / service / severity."""
+    where = "(owner_username = %s OR owner_username = 'system')"
+    params: List[Any] = [user]
     select = (
-        "SELECT id, incident_id, service, severity, "
+        "SELECT id, incident_id, service, severity, owner_username, "
         "DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
         "FROM reports"
     )
     kw = keyword.strip()
     if kw:
         like = f"%{kw}%"
-        rows = db.query(
-            select + " WHERE incident_id LIKE %s OR service LIKE %s OR severity LIKE %s "
-            "ORDER BY id DESC",
-            (like, like, like),
+        where += (
+            " AND (incident_id LIKE %s OR service LIKE %s OR severity LIKE %s)"
         )
-    else:
-        rows = db.query(select + " ORDER BY id DESC")
-    return {"reports": rows}
+        params.extend([like, like, like])
+
+    total_rows = db.query(
+        f"SELECT COUNT(*) AS total FROM reports WHERE {where}",
+        tuple(params),
+    )
+    total = int(total_rows[0]["total"]) if total_rows else 0
+    rows = db.query(
+        select + f" WHERE {where} ORDER BY id DESC LIMIT %s OFFSET %s",
+        tuple(params + [limit, offset]),
+    )
+    return {
+        "reports": rows,
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+            "has_more": offset + len(rows) < total,
+        },
+    }
 
 
 @app.delete("/incidents/reports")
 def delete_all_reports(user: str = Depends(get_current_user)):
-    """Delete ALL historical reports (permanent)."""
-    affected = db.execute("DELETE FROM reports")
+    """Delete the current user's historical reports."""
+    affected = db.execute(
+        "DELETE FROM reports WHERE owner_username = %s",
+        (user,),
+    )
     return {"ok": True, "deleted": affected}
 
 
@@ -693,10 +724,11 @@ def delete_all_reports(user: str = Depends(get_current_user)):
 def get_report_by_id(rid: int, user: str = Depends(get_current_user)):
     """Retrieve one historical report by its run id."""
     rows = db.query(
-        "SELECT id, incident_id, service, severity, payload, "
+        "SELECT id, incident_id, service, severity, owner_username, payload, "
         "DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at "
-        "FROM reports WHERE id = %s",
-        (rid,),
+        "FROM reports WHERE id = %s "
+        "AND (owner_username = %s OR owner_username = 'system')",
+        (rid, user),
     )
     if not rows:
         raise HTTPException(status_code=404, detail=f"No report with id {rid}")
@@ -706,6 +738,7 @@ def get_report_by_id(rid: int, user: str = Depends(get_current_user)):
         "incident_id": row["incident_id"],
         "service": row["service"],
         "severity": row["severity"],
+        "owner_username": row["owner_username"],
         "created_at": row["created_at"],
         "payload": json.loads(row["payload"]),
     }
@@ -714,7 +747,10 @@ def get_report_by_id(rid: int, user: str = Depends(get_current_user)):
 @app.delete("/incidents/reports/{rid}")
 def delete_report_by_id(rid: int, user: str = Depends(get_current_user)):
     """Delete one historical report by its run id (permanent)."""
-    affected = db.execute("DELETE FROM reports WHERE id = %s", (rid,))
+    affected = db.execute(
+        "DELETE FROM reports WHERE id = %s AND owner_username = %s",
+        (rid, user),
+    )
     if not affected:
         raise HTTPException(status_code=404, detail=f"No report with id {rid}")
     return {"ok": True, "deleted_id": rid}

@@ -1,10 +1,23 @@
 import os
+import random
 import time
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import List, Dict, Any
 
 load_dotenv()
+
+
+class LLMError(RuntimeError):
+    """Provider error after retries are exhausted or retries are not allowed."""
+
+    def __init__(self, info: Dict[str, str], original: Exception = None):
+        self.info = info
+        self.category = info.get("category", "unknown")
+        self.original = original
+        message = info.get("message", "大模型请求失败")
+        hint = info.get("hint", "")
+        super().__init__(f"{message} ({self.category})" + (f"：{hint}" if hint else ""))
 
 
 def classify_llm_error(exc: Exception) -> Dict[str, str]:
@@ -63,6 +76,16 @@ class HelloAgentsLLM:
         api_key = api_key or os.getenv("LLM_API_KEY")
         base_url = base_url or os.getenv("LLM_BASE_URL")
         timeout = timeout or int(os.getenv("LLM_TIMEOUT", "60"))
+        self.timeout = timeout
+        self.max_retries = max(0, int(os.getenv("LLM_MAX_RETRIES", "2")))
+        self.retry_base_delay = max(
+            0.0,
+            float(os.getenv("LLM_RETRY_BASE_SECONDS", "0.5")),
+        )
+        self.request_budget = max(
+            1.0,
+            float(os.getenv("LLM_REQUEST_BUDGET_SECONDS", "120")),
+        )
         self.verbose = verbose
         self.base_url = base_url
 
@@ -128,26 +151,84 @@ class HelloAgentsLLM:
                 **info,
             }
 
+    def _create_stream(self, messages: List[Dict[str, str]], temperature: float, timeout: float):
+        client = self.client.with_options(timeout=timeout)
+        return client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            stream=True,
+        )
+
     def think(self, messages: List[Dict[str, str]], temperature: float = 0) -> str:
-        if self.verbose:
-            print(f"🧠 Calling {self.model}...")
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                stream=True,
-            )
-            collected = []
-            for chunk in response:
-                content = chunk.choices[0].delta.content or ""
+        started = time.monotonic()
+        last_error = None
+        failure_info = None
+
+        for attempt in range(self.max_retries + 1):
+            remaining = self.request_budget - (time.monotonic() - started)
+            if remaining <= 0:
+                failure_info = {
+                    "category": "budget_exhausted",
+                    "message": "大模型请求总预算已耗尽",
+                    "hint": "请检查上游延迟，或适当提高 LLM_REQUEST_BUDGET_SECONDS",
+                }
+                break
+
+            if self.verbose:
+                print(f"🧠 Calling {self.model}... (attempt {attempt + 1})")
+            try:
+                response = self._create_stream(
+                    messages,
+                    temperature,
+                    min(self.timeout, remaining),
+                )
+                collected = []
+                for chunk in response:
+                    content = chunk.choices[0].delta.content or ""
+                    if self.verbose:
+                        print(content, end="", flush=True)
+                    collected.append(content)
                 if self.verbose:
-                    print(content, end="", flush=True)
-                collected.append(content)
-            if self.verbose:
-                print()
-            return "".join(collected)
-        except Exception as e:
-            if self.verbose:
-                print(f"❌ LLM API error: {e}")
-            return ""
+                    print()
+
+                reply = "".join(collected).strip()
+                if reply:
+                    return reply
+                failure_info = {
+                    "category": "empty_response",
+                    "message": "模型返回空内容",
+                    "hint": "稍后重试；若持续出现，请更换模型或检查接口参数",
+                }
+            except Exception as exc:
+                last_error = exc
+                failure_info = classify_llm_error(exc)
+                if self.verbose:
+                    print(f"❌ LLM API error: {exc}")
+
+            retryable = failure_info and failure_info["category"] in {
+                "rate_limit",
+                "server_error",
+                "network_error",
+                "empty_response",
+            }
+            if not retryable or attempt >= self.max_retries:
+                break
+
+            remaining = self.request_budget - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            delay = min(
+                self.retry_base_delay * (2 ** attempt)
+                + random.uniform(0, self.retry_base_delay * 0.25),
+                remaining,
+            )
+            if delay > 0:
+                time.sleep(delay)
+
+        info = failure_info or {
+            "category": "unknown",
+            "message": "大模型请求失败",
+            "hint": "检查模型配置和服务状态",
+        }
+        raise LLMError(info, last_error)

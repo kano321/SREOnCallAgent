@@ -42,6 +42,8 @@ kubectl -n sre-oncall create secret generic sre-app-secret \
 
 `secret.example.yaml` 只用于说明字段结构，不要把其中的占位值直接用于生产环境。
 
+`configmap.yaml` 默认设置 `SESSION_COOKIE_SECURE=false`，以便通过本地 HTTP 端口转发演示。通过 HTTPS Ingress 对外提供服务时，应将其改为 `true`。
+
 ## 部署应用
 
 ```bash
@@ -109,3 +111,4 @@ kubectl -n sre-oncall get events --sort-by=.lastTimestamp
 - Ingress 清单默认使用 ingress-nginx，本地验证可以不启用 Ingress。
 - Pod 已配置 Prometheus 抓取注解，但集群中仍需单独部署 Prometheus Operator 或等价的抓取配置。
 - 扩展到多副本前，必须先将共享状态迁移到 Redis，并完成跨副本一致性测试。
+- 旧 Token 查询参数鉴权在 Kubernetes 配置中默认关闭，前端使用 HttpOnly Cookie 连接 SSE。

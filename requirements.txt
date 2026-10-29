@@ -11,4 +11,5 @@ pyyaml>=6.0.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 pymysql>=1.1.0        # MySQL persistence
+DBUtils>=3.1.0,<4.0
 prometheus-client>=0.21.0
